@@ -29,6 +29,7 @@ public sealed class BattlePrototypeController : MonoBehaviour
     Color32[] paint;
     int[] paintOwner;
     Texture2D mapTexture;
+    Texture2D paintTexture;
     Collider mapFloorCollider;
     GameObject playerObject, rivalObject, wallObject;
     CharacterController playerController;
@@ -210,6 +211,23 @@ public sealed class BattlePrototypeController : MonoBehaviour
         floor.GetComponent<Renderer>().material = NewMapMaterial();
         mapFloorCollider = floor.GetComponent<Collider>();
 
+        // This transparent overlay is the visible source of truth for paint. A later
+        // colour write replaces the same texture cells, so paint can be overwritten.
+        paintTexture = new Texture2D(Width, Height, TextureFormat.RGBA32, false)
+        {
+            filterMode = FilterMode.Point,
+            wrapMode = TextureWrapMode.Clamp
+        };
+        var paintOverlay = GameObject.CreatePrimitive(PrimitiveType.Plane);
+        paintOverlay.name = "Paint Overlay";
+        paintOverlay.transform.SetParent(mapRoot);
+        paintOverlay.transform.position = new Vector3(0f, .015f, 0f);
+        paintOverlay.transform.localScale = new Vector3(BoardWidth / 10f, 1f, BoardDepth / 10f);
+        Material overlayMaterial = NewTransparentTextureMaterial(paintTexture);
+        overlayMaterial.renderQueue = (int)RenderQueue.Transparent + 1;
+        paintOverlay.GetComponent<Renderer>().material = overlayMaterial;
+        Destroy(paintOverlay.GetComponent<Collider>());
+
         var border = GameObject.CreatePrimitive(PrimitiveType.Cube);
         border.name = "Map Base";
         border.transform.SetParent(mapRoot);
@@ -220,10 +238,15 @@ public sealed class BattlePrototypeController : MonoBehaviour
 
     Material NewMapMaterial()
     {
+        return NewTransparentTextureMaterial(mapTexture);
+    }
+
+    Material NewTransparentTextureMaterial(Texture2D texture)
+    {
         Shader shader = Shader.Find("Universal Render Pipeline/Unlit");
         if (shader == null) shader = Shader.Find("Unlit/Texture");
-        var material = new Material(shader) { mainTexture = mapTexture };
-        if (material.HasProperty("_BaseMap")) material.SetTexture("_BaseMap", mapTexture);
+        var material = new Material(shader) { mainTexture = texture };
+        if (material.HasProperty("_BaseMap")) material.SetTexture("_BaseMap", texture);
         if (material.HasProperty("_Surface")) material.SetFloat("_Surface", 1f);
         if (material.HasProperty("_Blend")) material.SetFloat("_Blend", 0f);
         if (material.HasProperty("_SrcBlend")) material.SetInt("_SrcBlend", (int)BlendMode.SrcAlpha);
@@ -351,8 +374,14 @@ public sealed class BattlePrototypeController : MonoBehaviour
             paint[index] = palette[color];
             paintOwner[index] = owner;
         }
-        // Visual paint is rendered as physical decals below each actor, not by changing
-        // this map texture. This keeps each visible mark at its world-space position.
+        RefreshPaintTexture();
+    }
+
+    void RefreshPaintTexture()
+    {
+        if (paintTexture == null) return;
+        paintTexture.SetPixels32(paint);
+        paintTexture.Apply(false);
     }
 
     bool TryGetMapHit(Transform actor, out RaycastHit hit)
@@ -370,14 +399,6 @@ public sealed class BattlePrototypeController : MonoBehaviour
     {
         Vector3 point = new Vector3(world.x, .025f, world.z);
         if (hasLastStamp && Vector3.Distance(lastStamp, point) < .42f) return false;
-        var stamp = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
-        stamp.name = label;
-        stamp.transform.SetParent(paintStampRoot);
-        stamp.layer = LayerMask.NameToLayer("Ignore Raycast");
-        stamp.transform.position = point;
-        stamp.transform.localScale = new Vector3(PaintRadius * 2f, .012f, PaintRadius * 2f);
-        stamp.GetComponent<Renderer>().material = NewColorMaterial(palette[color]);
-        Destroy(stamp.GetComponent<Collider>());
         hasLastStamp = true;
         lastStamp = point;
         return true;
@@ -497,7 +518,7 @@ public sealed class BattlePrototypeController : MonoBehaviour
         player = new Vector3(-22f, 0f, -10f); rival = rivalDestination = new Vector3(22f, 0f, 10f);
         Array.Clear(paint, 0, paint.Length);
         for (int i = 0; i < paintOwner.Length; i++) paintOwner[i] = -1;
-        wallObject.SetActive(true); RefreshMapTexture();
+        wallObject.SetActive(true); RefreshMapTexture(); RefreshPaintTexture();
         foreach (Transform stamp in paintStampRoot) Destroy(stamp.gameObject);
         hasPlayerStamp = hasRivalStamp = false;
         foreach (LineRenderer trail in playerTrails) if (trail != null) Destroy(trail.gameObject);
