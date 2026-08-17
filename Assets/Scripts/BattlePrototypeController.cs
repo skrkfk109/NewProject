@@ -16,6 +16,12 @@ public sealed class BattlePrototypeController : MonoBehaviour
     const float BoardWidth = 60f;
     const float BoardDepth = 36f;
     const float PaintRadius = .36f;
+    const float ThirdPersonDistance = 8f;
+    const float ThirdPersonTargetHeight = .95f;
+
+    [Header("Camera Controls")]
+    [SerializeField, Range(.1f, 12f)] float horizontalLookSensitivity = 4.2f;
+    [SerializeField, Range(.1f, 12f)] float verticalLookSensitivity = 3.2f;
     const float TotalSeconds = 75f;
     const float WallFallsAt = 30f;
 
@@ -46,7 +52,7 @@ public sealed class BattlePrototypeController : MonoBehaviour
     Vector3 rival = new Vector3(22f, 0f, 10f);
     Vector3 rivalDestination = new Vector3(22f, 0f, 10f);
     float playerVelocityY, rivalTurn, remaining = TotalSeconds;
-    float cameraYaw, cameraPitch = 38f;
+    float cameraYaw, cameraPitch = 16f;
     int selectedColor;
     bool wallDown, finished;
     bool runtimeInitialized;
@@ -129,11 +135,11 @@ public sealed class BattlePrototypeController : MonoBehaviour
         Camera camera = Camera.main;
         if (camera == null) camera = new GameObject("Battle Camera").AddComponent<Camera>();
         camera.orthographic = false;
-        camera.fieldOfView = 66f;
+        camera.fieldOfView = 70f;
         camera.backgroundColor = new Color(.035f, .05f, .085f);
         cameraTransform = camera.transform;
-        cameraTransform.position = player + new Vector3(0f, 8.5f, -11f);
-        cameraTransform.LookAt(player + new Vector3(0f, 1.2f, 4.5f));
+        cameraTransform.position = player + new Vector3(0f, 3.2f, -7.4f);
+        cameraTransform.LookAt(player + new Vector3(0f, ThirdPersonTargetHeight, 4f));
     }
 
     /// <summary>Entry point for a future room-host upload UI.</summary>
@@ -292,10 +298,10 @@ public sealed class BattlePrototypeController : MonoBehaviour
         cameraPivot = new GameObject("Camera Pivot").transform;
         cameraTarget.SetParent(playerRoot);
         cameraPivot.SetParent(cameraTarget);
-        cameraTarget.position = playerObject.transform.position + Vector3.up * .7f;
+        cameraTarget.position = playerObject.transform.position + Vector3.up * ThirdPersonTargetHeight;
         cameraPivot.localPosition = Vector3.zero;
         cameraTransform.SetParent(cameraPivot);
-        cameraTransform.localPosition = new Vector3(0f, 0f, -13.9f);
+        cameraTransform.localPosition = new Vector3(0f, 0f, -ThirdPersonDistance);
         cameraTransform.localRotation = Quaternion.identity;
     }
 
@@ -589,8 +595,8 @@ public sealed class BattlePrototypeController : MonoBehaviour
         if (cameraTransform == null || cameraTarget == null || cameraPivot == null || playerObject == null) return;
         if (Input.GetMouseButton(1))
         {
-            cameraYaw += Input.GetAxis("Mouse X") * 4.2f;
-            cameraPitch = Mathf.Clamp(cameraPitch - Input.GetAxis("Mouse Y") * 3.2f, 18f, 72f);
+            cameraYaw += Input.GetAxis("Mouse X") * horizontalLookSensitivity;
+            cameraPitch = Mathf.Clamp(cameraPitch - Input.GetAxis("Mouse Y") * verticalLookSensitivity, 5f, 42f);
             Cursor.lockState = CursorLockMode.Locked;
             Cursor.visible = false;
         }
@@ -599,9 +605,9 @@ public sealed class BattlePrototypeController : MonoBehaviour
             Cursor.lockState = CursorLockMode.None;
             Cursor.visible = true;
         }
-        cameraTarget.position = Vector3.Lerp(cameraTarget.position, playerObject.transform.position + Vector3.up * .7f, 12f * Time.deltaTime);
+        cameraTarget.position = Vector3.Lerp(cameraTarget.position, playerObject.transform.position + Vector3.up * ThirdPersonTargetHeight, 12f * Time.deltaTime);
         cameraPivot.rotation = Quaternion.Euler(cameraPitch, cameraYaw, 0f);
-        float distance = 13.9f;
+        float distance = ThirdPersonDistance;
         if (Physics.SphereCast(cameraPivot.position, .25f, -cameraPivot.forward, out RaycastHit hit, distance, Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore))
             distance = Mathf.Max(2.5f, hit.distance - .2f);
         cameraTransform.localPosition = Vector3.Lerp(cameraTransform.localPosition, new Vector3(0f, 0f, -distance), 16f * Time.deltaTime);
