@@ -5,16 +5,14 @@ using UnityEngine.Rendering;
 
 /// <summary>
 /// 3D painting-battle prototype. The controller can live in a scene or create itself
-/// at runtime. Add Assets/Resources/PlayableMap.png (Read/Write Enabled) to replace
-/// the demonstration image with a host-provided map.
+/// at runtime. Assign any image to Map Source in the Inspector to use it as the
+/// playable field. Read/Write is enabled automatically in the Unity editor.
 /// </summary>
 [ExecuteAlways]
 public sealed class BattlePrototypeController : MonoBehaviour
 {
-    const int Width = 192;
-    const int Height = 112;
-    const float BoardWidth = 60f;
-    const float BoardDepth = 36f;
+    const int Width = 384;
+    const int Height = 384;
     const float PaintRadius = .36f;
     const float ThirdPersonDistance = 8f;
     const float ThirdPersonTargetHeight = .95f;
@@ -22,10 +20,27 @@ public sealed class BattlePrototypeController : MonoBehaviour
     [Header("Camera Controls")]
     [SerializeField, Range(.1f, 12f)] float horizontalLookSensitivity = 4.2f;
     [SerializeField, Range(.1f, 12f)] float verticalLookSensitivity = 3.2f;
+    [SerializeField, Range(2f, 12f)] float zoomInDistance = 3.5f;
+    [SerializeField, Range(6f, 40f)] float zoomOutDistance = 18f;
+    [SerializeField, Range(1f, 30f)] float zoomSensitivity = 12f;
+    [Header("Image Field Generation")]
+    [SerializeField, Range(3, 8)] int paletteSize = 5;
+    [SerializeField, Range(24, 128)] int terrainColumns = 80;
+    [SerializeField, Range(16, 96)] int terrainRows = 48;
+    [SerializeField, Range(.1f, 12f)] float terrainHeight = 5f;
+    [SerializeField, Range(.25f, 4f)] float heightContrast = 1.35f;
+    [SerializeField, Range(0, 6)] int heightSmoothingPasses = 2;
+    [SerializeField, Range(60f, 300f)] float fieldLongSide = 180f;
+    [SerializeField] Texture2D mapSource;
+
+    float boardWidth = 60f;
+    float boardDepth = 36f;
+    float BoardWidth => boardWidth;
+    float BoardDepth => boardDepth;
     const float TotalSeconds = 75f;
     const float WallFallsAt = 30f;
 
-    readonly Color32[] palette = {
+    Color32[] palette = {
         new Color32(255, 107, 107, 255), new Color32(255, 205, 86, 255),
         new Color32(70, 201, 130, 255), new Color32(70, 155, 255, 255),
         new Color32(172, 112, 255, 255)
@@ -34,9 +49,19 @@ public sealed class BattlePrototypeController : MonoBehaviour
     Color32[] targets;
     Color32[] paint;
     int[] paintOwner;
+    readonly int[] coverageTotal = new int[2];
+    readonly int[] coveragePainted = new int[2];
+    readonly int[] coverageCorrect = new int[2];
+    readonly int[] coverageWrong = new int[2];
+    readonly int[] coverageForeign = new int[2];
+    bool coverageDirty = true;
     Texture2D mapTexture;
     Texture2D paintTexture;
+    Texture2D sourceTexture;
+    float[] terrainHeights;
+    Mesh terrainMesh;
     Collider mapFloorCollider;
+    GameObject terrainObject, paintOverlayObject;
     GameObject playerObject, rivalObject, wallObject;
     CharacterController playerController;
     Transform mapRoot, playerRoot, rivalRoot, environmentRoot;
@@ -53,6 +78,7 @@ public sealed class BattlePrototypeController : MonoBehaviour
     Vector3 rivalDestination = new Vector3(22f, 0f, 10f);
     float playerVelocityY, rivalTurn, remaining = TotalSeconds;
     float cameraYaw, cameraPitch = 16f;
+    float desiredCameraDistance = ThirdPersonDistance;
     int selectedColor;
     bool wallDown, finished;
     bool runtimeInitialized;
@@ -80,6 +106,24 @@ public sealed class BattlePrototypeController : MonoBehaviour
         if (!Application.isPlaying) CreateEditorPreview();
     }
 
+    void OnValidate()
+    {
+#if UNITY_EDITOR
+        // BuildMap samples image pixels. Enable this automatically so an image dragged
+        // into the Inspector is not silently replaced by the demo map at Play time.
+        if (mapSource != null)
+        {
+            string assetPath = UnityEditor.AssetDatabase.GetAssetPath(mapSource);
+            var importer = UnityEditor.AssetImporter.GetAtPath(assetPath) as UnityEditor.TextureImporter;
+            if (importer != null && !importer.isReadable)
+            {
+                importer.isReadable = true;
+                importer.SaveAndReimport();
+            }
+        }
+#endif
+    }
+
     void Start()
     {
         if (Application.isPlaying) InitializeRuntime();
@@ -91,7 +135,7 @@ public sealed class BattlePrototypeController : MonoBehaviour
         runtimeInitialized = true;
         Application.targetFrameRate = 60;
         SetupCamera();
-        BuildMap(Resources.Load<Texture2D>("PlayableMap"));
+        BuildMap(mapSource != null ? mapSource : Resources.Load<Texture2D>("PlayableMap"));
         CreateWorldObjects();
     }
 
@@ -99,6 +143,7 @@ public sealed class BattlePrototypeController : MonoBehaviour
     // compose and inspect the battle space before entering Play mode.
     void CreateEditorPreview()
     {
+        CreateUiHierarchy();
         editorPreviewRoot = transform.Find("Editor Preview");
         if (editorPreviewRoot != null) return;
         editorPreviewRoot = new GameObject("Editor Preview").transform;
@@ -119,6 +164,33 @@ public sealed class BattlePrototypeController : MonoBehaviour
         wall.transform.position = new Vector3(0f, 1.8f, 0f);
         wall.transform.localScale = new Vector3(.3f, 3.6f, BoardDepth);
         wall.GetComponent<Renderer>().material = NewColorMaterial(new Color(.85f, .92f, 1f));
+    }
+
+    void CreateUiHierarchy()
+    {
+        Transform ui = transform.Find("UI");
+        if (ui == null)
+        {
+            ui = new GameObject("UI").transform;
+            ui.SetParent(transform);
+        }
+        CreateUiSlot(ui, "HUD");
+        Transform hud = ui.Find("HUD");
+        CreateUiSlot(hud, "Timer");
+        CreateUiSlot(hud, "Team Scores");
+        CreateUiSlot(hud, "Current Target Colour");
+        CreateUiSlot(hud, "Selected Paint Colour");
+        CreateUiSlot(hud, "Barrier Status");
+        CreateUiSlot(hud, "Debug Score Readout");
+        CreateUiSlot(ui, "Controls Hint");
+        CreateUiSlot(ui, "End Result");
+    }
+
+    void CreateUiSlot(Transform parent, string label)
+    {
+        if (parent.Find(label) != null) return;
+        var slot = new GameObject(label).transform;
+        slot.SetParent(parent);
     }
 
     void CreatePreviewActor(string name, Color color, Vector3 position)
@@ -149,22 +221,140 @@ public sealed class BattlePrototypeController : MonoBehaviour
         paint = new Color32[targets.Length];
         paintOwner = new int[targets.Length];
         for (int i = 0; i < paintOwner.Length; i++) paintOwner[i] = -1;
-        Texture2D source = uploadedImage != null && uploadedImage.isReadable ? uploadedImage : CreateDemoImage();
+        coverageDirty = true;
+        sourceTexture = uploadedImage != null ? MakeReadable(uploadedImage) : CreateDemoImage();
+        SetFieldDimensions(sourceTexture);
+        BuildPalette(sourceTexture);
         for (int z = 0; z < Height; z++)
         for (int x = 0; x < Width; x++)
         {
-            Color sample = source.GetPixelBilinear((x + .5f) / Width, (z + .5f) / Height);
+            Color sample = sourceTexture.GetPixelBilinear((x + .5f) / Width, (z + .5f) / Height);
             targets[Index(x, z)] = palette[NearestPalette(sample)];
         }
+        BuildHeightMap(sourceTexture);
         if (mapTexture == null)
         {
             mapTexture = new Texture2D(Width, Height, TextureFormat.RGBA32, false)
             {
-                filterMode = FilterMode.Point,
+                filterMode = FilterMode.Bilinear,
                 wrapMode = TextureWrapMode.Clamp
             };
         }
         RefreshMapTexture();
+        if (terrainObject != null) RebuildTerrainGeometry();
+    }
+
+    Texture2D MakeReadable(Texture2D source)
+    {
+        if (source.isReadable) return source;
+
+        // Also supports images supplied at runtime, where importer settings cannot be
+        // changed. The copy is only created when Unity marks the source unreadable.
+        RenderTexture temporary = RenderTexture.GetTemporary(source.width, source.height, 0, RenderTextureFormat.ARGB32);
+        RenderTexture previous = RenderTexture.active;
+        Graphics.Blit(source, temporary);
+        RenderTexture.active = temporary;
+        var readableCopy = new Texture2D(source.width, source.height, TextureFormat.RGBA32, false)
+        {
+            name = source.name + " (Runtime Readable Copy)",
+            filterMode = source.filterMode,
+            wrapMode = TextureWrapMode.Clamp
+        };
+        readableCopy.ReadPixels(new Rect(0, 0, source.width, source.height), 0, 0);
+        readableCopy.Apply(false);
+        RenderTexture.active = previous;
+        RenderTexture.ReleaseTemporary(temporary);
+        return readableCopy;
+    }
+
+    void SetFieldDimensions(Texture2D source)
+    {
+        float aspect = source.width / (float)source.height;
+        if (aspect >= 1f)
+        {
+            boardWidth = fieldLongSide;
+            boardDepth = fieldLongSide / aspect;
+        }
+        else
+        {
+            boardWidth = fieldLongSide * aspect;
+            boardDepth = fieldLongSide;
+        }
+    }
+
+    void BuildPalette(Texture2D source)
+    {
+        int count = Mathf.Clamp(paletteSize, 3, 8);
+        Color[] centers = new Color[count];
+        for (int i = 0; i < count; i++)
+        {
+            float u = (i + .5f) / count;
+            float v = Mathf.Repeat(i * .6180339f + .23f, 1f);
+            centers[i] = source.GetPixelBilinear(u, v);
+        }
+        const int sampleCount = 2048;
+        for (int iteration = 0; iteration < 7; iteration++)
+        {
+            Vector3[] sums = new Vector3[count];
+            int[] counts = new int[count];
+            for (int i = 0; i < sampleCount; i++)
+            {
+                float u = Mathf.Repeat(i * .6180339f, 1f);
+                float v = Mathf.Repeat(i * .4142135f + .17f, 1f);
+                Color sample = source.GetPixelBilinear(u, v);
+                int nearest = NearestPalette(sample, centers);
+                sums[nearest] += new Vector3(sample.r, sample.g, sample.b);
+                counts[nearest]++;
+            }
+            for (int i = 0; i < count; i++)
+                if (counts[i] > 0) centers[i] = new Color(sums[i].x / counts[i], sums[i].y / counts[i], sums[i].z / counts[i]);
+        }
+        palette = new Color32[count];
+        for (int i = 0; i < count; i++) palette[i] = centers[i];
+    }
+
+    void BuildHeightMap(Texture2D source)
+    {
+        terrainColumns = Mathf.Clamp(terrainColumns, 24, 128);
+        terrainRows = Mathf.Clamp(terrainRows, 16, 96);
+        terrainHeights = new float[terrainColumns * terrainRows];
+        for (int z = 0; z < terrainRows; z++)
+        for (int x = 0; x < terrainColumns; x++)
+        {
+            Color sample = source.GetPixelBilinear(1f - x / (float)(terrainColumns - 1), z / (float)(terrainRows - 1));
+            terrainHeights[z * terrainColumns + x] = sample.r * .2126f + sample.g * .7152f + sample.b * .0722f;
+        }
+        for (int pass = 0; pass < heightSmoothingPasses; pass++)
+        {
+            float[] smoothed = new float[terrainHeights.Length];
+            for (int z = 0; z < terrainRows; z++)
+            for (int x = 0; x < terrainColumns; x++)
+            {
+                float sum = 0f; int samples = 0;
+                for (int dz = -1; dz <= 1; dz++) for (int dx = -1; dx <= 1; dx++)
+                {
+                    int sx = Mathf.Clamp(x + dx, 0, terrainColumns - 1);
+                    int sz = Mathf.Clamp(z + dz, 0, terrainRows - 1);
+                    sum += terrainHeights[sz * terrainColumns + sx]; samples++;
+                }
+                smoothed[z * terrainColumns + x] = sum / samples;
+            }
+            terrainHeights = smoothed;
+        }
+        // Stretch the image's actual luminance range to the full height range. Without
+        // this, most photos only differ by a few tenths of a unit and look flat.
+        float darkest = float.MaxValue, brightest = float.MinValue;
+        for (int i = 0; i < terrainHeights.Length; i++)
+        {
+            darkest = Mathf.Min(darkest, terrainHeights[i]);
+            brightest = Mathf.Max(brightest, terrainHeights[i]);
+        }
+        float range = Mathf.Max(.0001f, brightest - darkest);
+        for (int i = 0; i < terrainHeights.Length; i++)
+        {
+            float normalized = Mathf.Clamp01((terrainHeights[i] - darkest) / range);
+            terrainHeights[i] = Mathf.Pow(normalized, heightContrast) * terrainHeight;
+        }
     }
 
     Texture2D CreateDemoImage()
@@ -190,7 +380,11 @@ public sealed class BattlePrototypeController : MonoBehaviour
         playerRoot = GetContainer("Player");
         rivalRoot = GetContainer("Rival");
         environmentRoot = GetContainer("Environment");
+        player = new Vector3(-BoardWidth * .37f, 0f, -BoardDepth * .28f);
+        rival = rivalDestination = new Vector3(BoardWidth * .37f, 0f, BoardDepth * .28f);
         CreateFloor();
+        player.y = SampleTerrainHeight(player.x, player.z);
+        rival.y = rivalDestination.y = SampleTerrainHeight(rival.x, rival.z);
         paintStampRoot = GetContainer("Paint Stamps");
         playerObject = CreateActor("Body", new Color(.12f, .55f, 1f), player, playerRoot);
         rivalObject = CreateActor("Body", new Color(1f, .2f, .3f), rival, rivalRoot);
@@ -210,29 +404,31 @@ public sealed class BattlePrototypeController : MonoBehaviour
 
     void CreateFloor()
     {
-        var floor = GameObject.CreatePrimitive(PrimitiveType.Plane);
+        terrainMesh = BuildTerrainMesh();
+        var floor = new GameObject("Playable Image Terrain");
+        terrainObject = floor;
         floor.name = "Playable Paint Map";
         floor.transform.SetParent(mapRoot);
-        floor.transform.localScale = new Vector3(BoardWidth / 10f, 1f, BoardDepth / 10f);
-        floor.GetComponent<Renderer>().material = NewMapMaterial();
-        mapFloorCollider = floor.GetComponent<Collider>();
+        floor.AddComponent<MeshFilter>().sharedMesh = terrainMesh;
+        floor.AddComponent<MeshRenderer>().material = NewMapMaterial();
+        mapFloorCollider = floor.AddComponent<MeshCollider>();
+        ((MeshCollider)mapFloorCollider).sharedMesh = terrainMesh;
 
         // This transparent overlay is the visible source of truth for paint. A later
         // colour write replaces the same texture cells, so paint can be overwritten.
         paintTexture = new Texture2D(Width, Height, TextureFormat.RGBA32, false)
         {
-            filterMode = FilterMode.Point,
+            filterMode = FilterMode.Bilinear,
             wrapMode = TextureWrapMode.Clamp
         };
-        var paintOverlay = GameObject.CreatePrimitive(PrimitiveType.Plane);
+        var paintOverlay = new GameObject("Paint Overlay");
+        paintOverlayObject = paintOverlay;
         paintOverlay.name = "Paint Overlay";
         paintOverlay.transform.SetParent(mapRoot);
-        paintOverlay.transform.position = new Vector3(0f, .015f, 0f);
-        paintOverlay.transform.localScale = new Vector3(BoardWidth / 10f, 1f, BoardDepth / 10f);
+        paintOverlay.AddComponent<MeshFilter>().sharedMesh = BuildOverlayMesh(terrainMesh, .025f);
         Material overlayMaterial = NewTransparentTextureMaterial(paintTexture);
         overlayMaterial.renderQueue = (int)RenderQueue.Transparent + 1;
-        paintOverlay.GetComponent<Renderer>().material = overlayMaterial;
-        Destroy(paintOverlay.GetComponent<Collider>());
+        paintOverlay.AddComponent<MeshRenderer>().material = overlayMaterial;
 
         var border = GameObject.CreatePrimitive(PrimitiveType.Cube);
         border.name = "Map Base";
@@ -240,6 +436,68 @@ public sealed class BattlePrototypeController : MonoBehaviour
         border.transform.position = new Vector3(0f, -.12f, 0f);
         border.transform.localScale = new Vector3(BoardWidth + .3f, .2f, BoardDepth + .3f);
         border.GetComponent<Renderer>().material.color = new Color(.06f, .08f, .13f);
+    }
+
+    Mesh BuildTerrainMesh()
+    {
+        int vertexCount = terrainColumns * terrainRows;
+        var vertices = new Vector3[vertexCount];
+        var uvs = new Vector2[vertexCount];
+        var triangles = new int[(terrainColumns - 1) * (terrainRows - 1) * 6];
+        for (int z = 0; z < terrainRows; z++)
+        for (int x = 0; x < terrainColumns; x++)
+        {
+            int index = z * terrainColumns + x;
+            float x01 = x / (float)(terrainColumns - 1);
+            float z01 = z / (float)(terrainRows - 1);
+            vertices[index] = new Vector3((x01 - .5f) * BoardWidth, terrainHeights[index], (z01 - .5f) * BoardDepth);
+            // Match the existing Plane's mirrored U direction so teams remain left/right.
+            uvs[index] = new Vector2(1f - x01, z01);
+        }
+        int triangle = 0;
+        for (int z = 0; z < terrainRows - 1; z++)
+        for (int x = 0; x < terrainColumns - 1; x++)
+        {
+            int a = z * terrainColumns + x;
+            int b = a + terrainColumns;
+            triangles[triangle++] = a; triangles[triangle++] = b; triangles[triangle++] = a + 1;
+            triangles[triangle++] = a + 1; triangles[triangle++] = b; triangles[triangle++] = b + 1;
+        }
+        var mesh = new Mesh { name = "Generated Image Terrain" };
+        mesh.indexFormat = IndexFormat.UInt32;
+        mesh.vertices = vertices;
+        mesh.uv = uvs;
+        mesh.triangles = triangles;
+        mesh.RecalculateNormals();
+        mesh.RecalculateBounds();
+        return mesh;
+    }
+
+    Mesh BuildOverlayMesh(Mesh source, float normalOffset)
+    {
+        Vector3[] vertices = source.vertices;
+        Vector3[] normals = source.normals;
+        for (int i = 0; i < vertices.Length; i++) vertices[i] += normals[i] * normalOffset;
+        var overlay = new Mesh { name = "Generated Paint Overlay" };
+        overlay.indexFormat = IndexFormat.UInt32;
+        overlay.vertices = vertices;
+        overlay.uv = source.uv;
+        overlay.triangles = source.triangles;
+        overlay.normals = normals;
+        overlay.RecalculateBounds();
+        return overlay;
+    }
+
+    void RebuildTerrainGeometry()
+    {
+        terrainMesh = BuildTerrainMesh();
+        terrainObject.GetComponent<MeshFilter>().sharedMesh = terrainMesh;
+        MeshCollider collider = terrainObject.GetComponent<MeshCollider>();
+        collider.sharedMesh = null;
+        collider.sharedMesh = terrainMesh;
+        if (paintOverlayObject != null)
+            paintOverlayObject.GetComponent<MeshFilter>().sharedMesh = BuildOverlayMesh(terrainMesh, .025f);
+        RefreshPaintTexture();
     }
 
     Material NewMapMaterial()
@@ -301,6 +559,7 @@ public sealed class BattlePrototypeController : MonoBehaviour
         cameraTarget.position = playerObject.transform.position + Vector3.up * ThirdPersonTargetHeight;
         cameraPivot.localPosition = Vector3.zero;
         cameraTransform.SetParent(cameraPivot);
+        desiredCameraDistance = Mathf.Clamp(ThirdPersonDistance, zoomInDistance, zoomOutDistance);
         cameraTransform.localPosition = new Vector3(0f, 0f, -ThirdPersonDistance);
         cameraTransform.localRotation = Quaternion.identity;
     }
@@ -342,8 +601,8 @@ public sealed class BattlePrototypeController : MonoBehaviour
         playerVelocityY += Physics.gravity.y * Time.deltaTime;
         playerController.Move((moveDirection * 9f + Vector3.up * playerVelocityY) * Time.deltaTime);
         Vector3 constrained = playerObject.transform.position;
-        constrained.x = Mathf.Clamp(constrained.x, -29.5f, wallDown ? 29.5f : -.45f);
-        constrained.z = Mathf.Clamp(constrained.z, -17.5f, 17.5f);
+        constrained.x = Mathf.Clamp(constrained.x, -BoardWidth * .5f + .5f, wallDown ? BoardWidth * .5f - .5f : -.45f);
+        constrained.z = Mathf.Clamp(constrained.z, -BoardDepth * .5f + .5f, BoardDepth * .5f - .5f);
         playerObject.transform.position = constrained;
         player = playerObject.transform.position - Vector3.up;
     }
@@ -358,6 +617,7 @@ public sealed class BattlePrototypeController : MonoBehaviour
         }
         if (!wallDown) rivalDestination.x = Mathf.Max(rivalDestination.x, .45f);
         rival = Vector3.MoveTowards(rival, rivalDestination, 4.5f * Time.deltaTime);
+        rival.y = SampleTerrainHeight(rival.x, rival.z);
         rivalObject.transform.position = rival + Vector3.up;
     }
 
@@ -380,6 +640,7 @@ public sealed class BattlePrototypeController : MonoBehaviour
             paint[index] = palette[color];
             paintOwner[index] = owner;
         }
+        coverageDirty = true;
         RefreshPaintTexture();
     }
 
@@ -454,7 +715,7 @@ public sealed class BattlePrototypeController : MonoBehaviour
             // Keep the target hue easy to read while leaving enough brightness contrast
             // for the full-strength 3D paint stamps on top of it.
             Color32 faded = (Color)targets[i] * .78f;
-            faded.a = 110;
+            faded.a = 175;
             display[i] = faded;
         }
         mapTexture.SetPixels32(display);
@@ -487,10 +748,38 @@ public sealed class BattlePrototypeController : MonoBehaviour
         return best;
     }
 
+    int NearestPalette(Color color, Color[] colors)
+    {
+        int best = 0;
+        float bestDistance = float.MaxValue;
+        for (int i = 0; i < colors.Length; i++)
+        {
+            float dr = colors[i].r - color.r;
+            float dg = colors[i].g - color.g;
+            float db = colors[i].b - color.b;
+            float distance = dr * dr + dg * dg + db * db;
+            if (distance < bestDistance) { bestDistance = distance; best = i; }
+        }
+        return best;
+    }
+
+    float SampleTerrainHeight(float worldX, float worldZ)
+    {
+        if (terrainHeights == null) return 0f;
+        float x = Mathf.Clamp01(worldX / BoardWidth + .5f) * (terrainColumns - 1);
+        float z = Mathf.Clamp01(worldZ / BoardDepth + .5f) * (terrainRows - 1);
+        int x0 = Mathf.FloorToInt(x), z0 = Mathf.FloorToInt(z);
+        int x1 = Mathf.Min(x0 + 1, terrainColumns - 1), z1 = Mathf.Min(z0 + 1, terrainRows - 1);
+        float tx = x - x0, tz = z - z0;
+        float a = Mathf.Lerp(terrainHeights[z0 * terrainColumns + x0], terrainHeights[z0 * terrainColumns + x1], tx);
+        float b = Mathf.Lerp(terrainHeights[z1 * terrainColumns + x0], terrainHeights[z1 * terrainColumns + x1], tx);
+        return Mathf.Lerp(a, b, tz);
+    }
+
     Vector3 ClampToBoard(Vector3 value)
     {
-        value.x = Mathf.Clamp(value.x, -29.5f, 29.5f);
-        value.z = Mathf.Clamp(value.z, -17.5f, 17.5f);
+        value.x = Mathf.Clamp(value.x, -BoardWidth * .5f + .5f, BoardWidth * .5f - .5f);
+        value.z = Mathf.Clamp(value.z, -BoardDepth * .5f + .5f, BoardDepth * .5f - .5f);
         return value;
     }
 
@@ -502,28 +791,50 @@ public sealed class BattlePrototypeController : MonoBehaviour
 
     void GetCoverage(int team, out int total, out int paintedCells, out int correctCells, out int wrongCells, out int foreignCells)
     {
-        total = paintedCells = correctCells = wrongCells = foreignCells = 0;
+        RefreshCoverageIfNeeded();
+        total = coverageTotal[team];
+        paintedCells = coveragePainted[team];
+        correctCells = coverageCorrect[team];
+        wrongCells = coverageWrong[team];
+        foreignCells = coverageForeign[team];
+    }
+
+    // The target map is now high resolution, so score values are cached and recalculated
+    // only after a paint change instead of once for every GUI label.
+    void RefreshCoverageIfNeeded()
+    {
+        if (!coverageDirty) return;
+        Array.Clear(coverageTotal, 0, coverageTotal.Length);
+        Array.Clear(coveragePainted, 0, coveragePainted.Length);
+        Array.Clear(coverageCorrect, 0, coverageCorrect.Length);
+        Array.Clear(coverageWrong, 0, coverageWrong.Length);
+        Array.Clear(coverageForeign, 0, coverageForeign.Length);
         for (int z = 0; z < Height; z++)
         for (int x = 0; x < Width; x++)
         {
-            if (TeamAt(x) != team) continue;
-            total++;
+            int team = TeamAt(x);
+            coverageTotal[team]++;
             int index = Index(x, z);
             if (paint[index].a == 0) continue;
-            paintedCells++;
+            coveragePainted[team]++;
             Color32 p = paint[index], target = targets[index];
-            if (p.r == target.r && p.g == target.g && p.b == target.b) correctCells++;
-            else wrongCells++;
-            if (paintOwner[index] != team) foreignCells++;
+            if (p.r == target.r && p.g == target.g && p.b == target.b) coverageCorrect[team]++;
+            else coverageWrong[team]++;
+            if (paintOwner[index] != team) coverageForeign[team]++;
         }
+        coverageDirty = false;
     }
 
     void Restart()
     {
         remaining = TotalSeconds; wallDown = finished = false; selectedColor = 0;
-        player = new Vector3(-22f, 0f, -10f); rival = rivalDestination = new Vector3(22f, 0f, 10f);
+        player = new Vector3(-BoardWidth * .37f, SampleTerrainHeight(-BoardWidth * .37f, -BoardDepth * .28f), -BoardDepth * .28f);
+        rival = rivalDestination = new Vector3(BoardWidth * .37f, SampleTerrainHeight(BoardWidth * .37f, BoardDepth * .28f), BoardDepth * .28f);
+        playerObject.transform.position = player + Vector3.up;
+        rivalObject.transform.position = rival + Vector3.up;
         Array.Clear(paint, 0, paint.Length);
         for (int i = 0; i < paintOwner.Length; i++) paintOwner[i] = -1;
+        coverageDirty = true;
         wallObject.SetActive(true); RefreshMapTexture(); RefreshPaintTexture();
         foreach (Transform stamp in paintStampRoot) Destroy(stamp.gameObject);
         hasPlayerStamp = hasRivalStamp = false;
@@ -575,8 +886,7 @@ public sealed class BattlePrototypeController : MonoBehaviour
 
     string PaletteName(int index)
     {
-        string[] names = { "빨강", "노랑", "초록", "파랑", "보라" };
-        return index >= 0 && index < names.Length ? names[index] : "없음";
+        return index >= 0 && index < palette.Length ? $"색상 {index + 1}" : "없음";
     }
 
     void DrawColourSwatch(Rect rect, Color colour)
@@ -593,6 +903,10 @@ public sealed class BattlePrototypeController : MonoBehaviour
     {
         if (!Application.isPlaying) return;
         if (cameraTransform == null || cameraTarget == null || cameraPivot == null || playerObject == null) return;
+        // Positive wheel movement brings the camera closer; negative movement pulls it back.
+        float scroll = Input.GetAxis("Mouse ScrollWheel");
+        if (Mathf.Abs(scroll) > .0001f)
+            desiredCameraDistance = Mathf.Clamp(desiredCameraDistance - scroll * zoomSensitivity, zoomInDistance, zoomOutDistance);
         if (Input.GetMouseButton(1))
         {
             cameraYaw += Input.GetAxis("Mouse X") * horizontalLookSensitivity;
@@ -607,7 +921,7 @@ public sealed class BattlePrototypeController : MonoBehaviour
         }
         cameraTarget.position = Vector3.Lerp(cameraTarget.position, playerObject.transform.position + Vector3.up * ThirdPersonTargetHeight, 12f * Time.deltaTime);
         cameraPivot.rotation = Quaternion.Euler(cameraPitch, cameraYaw, 0f);
-        float distance = ThirdPersonDistance;
+        float distance = desiredCameraDistance;
         if (Physics.SphereCast(cameraPivot.position, .25f, -cameraPivot.forward, out RaycastHit hit, distance, Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore))
             distance = Mathf.Max(2.5f, hit.distance - .2f);
         cameraTransform.localPosition = Vector3.Lerp(cameraTransform.localPosition, new Vector3(0f, 0f, -distance), 16f * Time.deltaTime);

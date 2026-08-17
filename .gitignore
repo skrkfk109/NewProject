@@ -165,3 +165,5 @@ DerivedData/
 # Playgrounds
 timeline.xctimeline
 playground.xcworkspace
+.vscode
+Recordings
