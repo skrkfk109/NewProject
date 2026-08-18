@@ -1,6 +1,6 @@
 using System;
 using System.Collections.Generic;
-using Unity.Netcode;
+using ColorClash.Core;
 using UnityEngine;
 using UnityEngine.Rendering;
 
@@ -14,7 +14,6 @@ public sealed class BattlePrototypeController : MonoBehaviour
 {
     const int Width = 384;
     const int Height = 384;
-    const float PaintRadius = .36f;
     const float ThirdPersonDistance = 8f;
     const float ThirdPersonTargetHeight = .95f;
 
@@ -36,6 +35,9 @@ public sealed class BattlePrototypeController : MonoBehaviour
     [SerializeField] GameObject playerModel;
     [SerializeField] Vector3 playerModelRotation = new Vector3(-90f, 0f, 0f);
     [SerializeField, Range(1f, 30f)] float playerTurnSpeed = 12f;
+    [Header("Painting")]
+    [Tooltip("World-space radius painted beneath a player. 1.25 is slightly wider than the current slime body.")]
+    [SerializeField, Range(.3f, 3f)] float paintRadius = 1.25f;
 
     float boardWidth = 60f;
     float boardDepth = 36f;
@@ -99,12 +101,6 @@ public sealed class BattlePrototypeController : MonoBehaviour
     {
         if (FindObjectOfType<BattlePrototypeController>() == null)
             new GameObject("Battle Prototype").AddComponent<BattlePrototypeController>();
-
-        // The battle scene is also opened directly for offline iteration, so keep
-        // the bridge runtime-only and add it only when NGO already has a session.
-        if (NetworkManager.Singleton != null && NetworkManager.Singleton.IsListening &&
-            FindObjectOfType<ColorClashNetworkBridge>() == null)
-            new GameObject("Color Clash Network Bridge").AddComponent<ColorClashNetworkBridge>();
     }
 
     void Awake()
@@ -166,6 +162,10 @@ public sealed class BattlePrototypeController : MonoBehaviour
     {
         if (runtimeInitialized && playerObject != null && rivalObject != null) return;
         runtimeInitialized = true;
+        // An online battle will be enabled explicitly by the new Color Clash
+        // client transport. Do not auto-detect the imported Lobby sample here:
+        // that was the hidden dependency which mixed its minigame into battle.
+        if (!ColorClashSession.IsOnlineMatch) multiplayerActive = false;
         Application.targetFrameRate = 60;
         SetupCamera();
         BuildMap(mapSource != null ? mapSource : Resources.Load<Texture2D>("PlayableMap"));
@@ -774,15 +774,15 @@ public sealed class BattlePrototypeController : MonoBehaviour
     {
         int cx = Mathf.Clamp(Mathf.FloorToInt(mapUv.x * Width), 0, Width - 1);
         int cz = Mathf.Clamp(Mathf.FloorToInt(mapUv.y * Height), 0, Height - 1);
-        int radiusX = Mathf.CeilToInt(PaintRadius / (BoardWidth / Width));
-        int radiusZ = Mathf.CeilToInt(PaintRadius / (BoardDepth / Height));
+        int radiusX = Mathf.CeilToInt(paintRadius / (BoardWidth / Width));
+        int radiusZ = Mathf.CeilToInt(paintRadius / (BoardDepth / Height));
         for (int z = cz - radiusZ; z <= cz + radiusZ; z++)
         for (int x = cx - radiusX; x <= cx + radiusX; x++)
         {
             if (x < 0 || z < 0 || x >= Width || z >= Height) continue;
             float dx = ((x + .5f) / Width - mapUv.x) * BoardWidth;
             float dz = ((z + .5f) / Height - mapUv.y) * BoardDepth;
-            if (dx * dx + dz * dz > PaintRadius * PaintRadius) continue;
+            if (dx * dx + dz * dz > paintRadius * paintRadius) continue;
             int index = Index(x, z);
             paint[index] = palette[color];
             paintOwner[index] = owner;
