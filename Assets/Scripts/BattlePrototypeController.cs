@@ -32,6 +32,9 @@ public sealed class BattlePrototypeController : MonoBehaviour
     [SerializeField, Range(0, 6)] int heightSmoothingPasses = 2;
     [SerializeField, Range(60f, 300f)] float fieldLongSide = 180f;
     [SerializeField] Texture2D mapSource;
+    [SerializeField] GameObject playerModel;
+    [SerializeField] Vector3 playerModelRotation = new Vector3(-90f, 0f, 0f);
+    [SerializeField, Range(1f, 30f)] float playerTurnSpeed = 12f;
 
     float boardWidth = 60f;
     float boardDepth = 36f;
@@ -63,6 +66,9 @@ public sealed class BattlePrototypeController : MonoBehaviour
     Collider mapFloorCollider;
     GameObject terrainObject, paintOverlayObject;
     GameObject playerObject, rivalObject, wallObject;
+    Transform playerVisualPivot, rivalVisualPivot;
+    Vector3 playerVisualBasePosition, rivalVisualBasePosition;
+    bool rivalIsMoving;
     CharacterController playerController;
     Transform mapRoot, playerRoot, rivalRoot, environmentRoot;
     Transform editorPreviewRoot;
@@ -95,6 +101,9 @@ public sealed class BattlePrototypeController : MonoBehaviour
 
     void Awake()
     {
+#if UNITY_EDITOR
+        ResolvePlayerModelInEditor();
+#endif
         if (!Application.isPlaying)
         {
             CreateEditorPreview();
@@ -111,6 +120,7 @@ public sealed class BattlePrototypeController : MonoBehaviour
     void OnValidate()
     {
 #if UNITY_EDITOR
+        ResolvePlayerModelInEditor();
         // BuildMap samples image pixels. Enable this automatically so an image dragged
         // into the Inspector is not silently replaced by the demo map at Play time.
         if (mapSource != null)
@@ -125,6 +135,19 @@ public sealed class BattlePrototypeController : MonoBehaviour
         }
 #endif
     }
+
+#if UNITY_EDITOR
+    void ResolvePlayerModelInEditor()
+    {
+        const string modelPath = "Assets/Models/Slime_Model/tripo_convert_5530513a-4a0d-4c3e-9bae-71881d2ffa4a.fbx";
+        GameObject importedModel = UnityEditor.AssetDatabase.LoadAssetAtPath<GameObject>(modelPath);
+        if (importedModel != null && playerModel != importedModel)
+        {
+            playerModel = importedModel;
+            UnityEditor.EditorUtility.SetDirty(this);
+        }
+    }
+#endif
 
     void Start()
     {
@@ -147,6 +170,7 @@ public sealed class BattlePrototypeController : MonoBehaviour
     {
         CreateUiHierarchy();
         editorPreviewRoot = transform.Find("Editor Preview");
+        EnsurePlayerModelPreview();
         if (editorPreviewRoot != null) return;
         editorPreviewRoot = new GameObject("Editor Preview").transform;
         editorPreviewRoot.SetParent(transform);
@@ -166,6 +190,24 @@ public sealed class BattlePrototypeController : MonoBehaviour
         wall.transform.position = new Vector3(0f, 1.8f, 0f);
         wall.transform.localScale = new Vector3(.3f, 3.6f, BoardDepth);
         wall.GetComponent<Renderer>().material = NewColorMaterial(new Color(.85f, .92f, 1f));
+    }
+
+    void EnsurePlayerModelPreview()
+    {
+        if (playerModel == null) return;
+        Transform container = transform.Find("Player");
+        if (container == null) return;
+        Transform preview = container.Find("Slime Model Preview");
+        if (preview == null)
+        {
+            GameObject previewObject = Instantiate(playerModel, container);
+            previewObject.name = "Slime Model Preview";
+            preview = previewObject.transform;
+        }
+        preview.localPosition = Vector3.zero;
+        preview.localRotation = Quaternion.Euler(playerModelRotation);
+        preview.localScale = Vector3.one;
+        NormalizeModel(preview, 2f);
     }
 
     void CreateUiHierarchy()
@@ -388,8 +430,10 @@ public sealed class BattlePrototypeController : MonoBehaviour
         player.y = SampleTerrainHeight(player.x, player.z);
         rival.y = rivalDestination.y = SampleTerrainHeight(rival.x, rival.z);
         paintStampRoot = GetContainer("Paint Stamps");
-        playerObject = CreateActor("Body", new Color(.12f, .55f, 1f), player, playerRoot);
-        rivalObject = CreateActor("Body", new Color(1f, .2f, .3f), rival, rivalRoot);
+        Transform playerPreview = playerRoot.Find("Slime Model Preview");
+        if (playerPreview != null) playerPreview.gameObject.SetActive(false);
+        playerObject = CreateActor("Body", new Color(.12f, .55f, 1f), player, playerRoot, playerModel);
+        rivalObject = CreateActor("Body", new Color(1f, .2f, .3f), rival, rivalRoot, playerModel);
         playerController = playerObject.AddComponent<CharacterController>();
         playerController.center = Vector3.zero;
         playerController.height = 2f;
@@ -540,16 +584,78 @@ public sealed class BattlePrototypeController : MonoBehaviour
         return created;
     }
 
-    GameObject CreateActor(string label, Color color, Vector3 position, Transform parent)
+    GameObject CreateActor(string label, Color color, Vector3 position, Transform parent, GameObject modelPrefab = null)
     {
-        var actor = GameObject.CreatePrimitive(PrimitiveType.Capsule);
+        var actor = new GameObject(label);
         actor.name = label;
         actor.transform.SetParent(parent);
         actor.transform.position = position + Vector3.up;
         actor.layer = LayerMask.NameToLayer("Ignore Raycast");
-        Destroy(actor.GetComponent<CapsuleCollider>());
-        actor.GetComponent<Renderer>().material.color = color;
+        if (modelPrefab != null)
+        {
+            Transform visualPivot = new GameObject("Visual Motion").transform;
+            visualPivot.SetParent(actor.transform, false);
+            GameObject model = Instantiate(modelPrefab, visualPivot);
+            model.name = "Slime Model";
+            model.transform.localPosition = Vector3.zero;
+            model.transform.localRotation = Quaternion.Euler(playerModelRotation);
+            NormalizeModel(model.transform, 2f);
+            if (parent == playerRoot)
+            {
+                playerVisualPivot = visualPivot;
+                playerVisualBasePosition = visualPivot.localPosition;
+            }
+            else if (parent == rivalRoot)
+            {
+                rivalVisualPivot = visualPivot;
+                rivalVisualBasePosition = visualPivot.localPosition;
+            }
+        }
+        else
+        {
+            GameObject visual = GameObject.CreatePrimitive(PrimitiveType.Capsule);
+            visual.name = "Capsule Visual";
+            visual.transform.SetParent(actor.transform, false);
+            Destroy(visual.GetComponent<CapsuleCollider>());
+            visual.GetComponent<Renderer>().material.color = color;
+        }
         return actor;
+    }
+
+    void AnimatePlayerVisual()
+    {
+        float horizontal = (Input.GetKey(KeyCode.D) ? 1f : 0f) - (Input.GetKey(KeyCode.A) ? 1f : 0f);
+        float vertical = (Input.GetKey(KeyCode.W) ? 1f : 0f) - (Input.GetKey(KeyCode.S) ? 1f : 0f);
+        bool isMoving = horizontal * horizontal + vertical * vertical > .01f;
+        AnimateSlimeVisual(playerVisualPivot, playerVisualBasePosition, isMoving, 0f);
+        AnimateSlimeVisual(rivalVisualPivot, rivalVisualBasePosition, rivalIsMoving, 1.7f);
+    }
+
+    static void AnimateSlimeVisual(Transform visual, Vector3 basePosition, bool isMoving, float phaseOffset)
+    {
+        if (visual == null) return;
+        float phase = Time.time * (isMoving ? 10f : 2.2f) + phaseOffset;
+        float wave = Mathf.Sin(phase);
+        float bounce = isMoving ? Mathf.Max(0f, wave) * .16f : wave * .025f;
+        float squash = isMoving ? wave * .09f : wave * .018f;
+        Vector3 targetScale = new Vector3(1f + squash, 1f - squash, 1f + squash);
+        Vector3 targetPosition = basePosition + Vector3.up * bounce;
+
+        visual.localScale = Vector3.Lerp(visual.localScale, targetScale, 14f * Time.deltaTime);
+        visual.localPosition = Vector3.Lerp(visual.localPosition, targetPosition, 14f * Time.deltaTime);
+    }
+
+    static void NormalizeModel(Transform model, float targetHeight)
+    {
+        Renderer[] renderers = model.GetComponentsInChildren<Renderer>();
+        if (renderers.Length == 0) return;
+        Bounds bounds = renderers[0].bounds;
+        for (int i = 1; i < renderers.Length; i++) bounds.Encapsulate(renderers[i].bounds);
+        if (bounds.size.y <= .0001f) return;
+        model.localScale *= targetHeight / bounds.size.y;
+        bounds = renderers[0].bounds;
+        for (int i = 1; i < renderers.Length; i++) bounds.Encapsulate(renderers[i].bounds);
+        model.position += model.parent.position - bounds.center;
     }
 
     void CreateCameraRig()
@@ -576,6 +682,7 @@ public sealed class BattlePrototypeController : MonoBehaviour
         if (!wallDown && remaining <= WallFallsAt) { wallDown = true; wallObject.SetActive(false); }
         MovePlayer();
         if (!multiplayerActive) MoveRival();
+        AnimatePlayerVisual();
         // Painting is deliberate: movement alone never changes the map.
         if (Input.GetMouseButton(0) && TryGetMapHit(playerObject.transform, out RaycastHit playerHit))
         {
@@ -601,6 +708,14 @@ public sealed class BattlePrototypeController : MonoBehaviour
         Vector3 input = new Vector3((Input.GetKey(KeyCode.D) ? 1 : 0) - (Input.GetKey(KeyCode.A) ? 1 : 0), 0f, (Input.GetKey(KeyCode.W) ? 1 : 0) - (Input.GetKey(KeyCode.S) ? 1 : 0));
         if (input.sqrMagnitude > 1f) input.Normalize();
         Vector3 moveDirection = Quaternion.Euler(0f, cameraYaw, 0f) * input;
+        if (moveDirection.sqrMagnitude > .0001f)
+        {
+            Quaternion targetRotation = Quaternion.LookRotation(moveDirection, Vector3.up);
+            playerObject.transform.rotation = Quaternion.Slerp(
+                playerObject.transform.rotation,
+                targetRotation,
+                playerTurnSpeed * Time.deltaTime);
+        }
         if (playerController.isGrounded && playerVelocityY < 0f) playerVelocityY = -1.5f;
         if (Input.GetKeyDown(KeyCode.Space) && playerController.isGrounded) playerVelocityY = 6.1f;
         playerVelocityY += Physics.gravity.y * Time.deltaTime;
@@ -628,7 +743,19 @@ public sealed class BattlePrototypeController : MonoBehaviour
             rivalDestination = ClampToBoard(rival + new Vector3(UnityEngine.Random.Range(-2.5f, 2.5f), 0f, UnityEngine.Random.Range(-2.5f, 2.5f)));
         }
         if (!wallDown) rivalDestination.x = Mathf.Max(rivalDestination.x, .45f);
+        Vector3 previousPosition = rival;
         rival = Vector3.MoveTowards(rival, rivalDestination, 4.5f * Time.deltaTime);
+        Vector3 moveDirection = rival - previousPosition;
+        moveDirection.y = 0f;
+        rivalIsMoving = moveDirection.sqrMagnitude > .000001f;
+        if (rivalIsMoving)
+        {
+            Quaternion targetRotation = Quaternion.LookRotation(moveDirection, Vector3.up);
+            rivalObject.transform.rotation = Quaternion.Slerp(
+                rivalObject.transform.rotation,
+                targetRotation,
+                playerTurnSpeed * Time.deltaTime);
+        }
         rival.y = SampleTerrainHeight(rival.x, rival.z);
         rivalObject.transform.position = rival + Vector3.up;
     }

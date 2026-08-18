@@ -1039,6 +1039,7 @@ MonoBehaviour:
   heightSmoothingPasses: 2
   fieldLongSide: 180
   mapSource: {fileID: 2800000, guid: 01d80815725324aa9b23f0db4d66735f, type: 3}
+  playerModel: {fileID: 0}
 --- !u!114 &2084000004
 MonoBehaviour:
   m_ObjectHideFlags: 0
