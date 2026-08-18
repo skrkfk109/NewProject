@@ -1006,6 +1006,7 @@ GameObject:
   m_Component:
   - component: {fileID: 2084000003}
   - component: {fileID: 2084000002}
+  - component: {fileID: 2084000004}
   m_Layer: 0
   m_Name: Battle Prototype
   m_TagString: Untagged
@@ -1038,6 +1039,18 @@ MonoBehaviour:
   heightSmoothingPasses: 2
   fieldLongSide: 180
   mapSource: {fileID: 2800000, guid: 01d80815725324aa9b23f0db4d66735f, type: 3}
+--- !u!114 &2084000004
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 2084000001}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 7467e9d97a9448ff9dc4d87452dc50f4, type: 3}
+  m_Name:
+  m_EditorClassIdentifier:
 --- !u!4 &2084000003
 Transform:
   m_ObjectHideFlags: 0

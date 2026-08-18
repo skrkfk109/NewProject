@@ -81,6 +81,8 @@ public sealed class BattlePrototypeController : MonoBehaviour
     float desiredCameraDistance = ThirdPersonDistance;
     int selectedColor;
     bool wallDown, finished;
+    bool multiplayerActive, multiplayerHost;
+    int multiplayerTeam;
     bool runtimeInitialized;
     readonly System.Random random = new System.Random(19);
 
@@ -569,18 +571,21 @@ public sealed class BattlePrototypeController : MonoBehaviour
         if (!Application.isPlaying) return;
         InitializeRuntime();
         if (playerObject == null || rivalObject == null) return;
-        if (finished) { if (Input.GetKeyDown(KeyCode.R)) Restart(); return; }
-        remaining = Mathf.Max(0f, remaining - Time.deltaTime);
+        if (finished) { if (Input.GetKeyDown(KeyCode.R) && (!multiplayerActive || multiplayerHost)) Restart(); return; }
+        if (!multiplayerActive || multiplayerHost) remaining = Mathf.Max(0f, remaining - Time.deltaTime);
         if (!wallDown && remaining <= WallFallsAt) { wallDown = true; wallObject.SetActive(false); }
         MovePlayer();
-        MoveRival();
+        if (!multiplayerActive) MoveRival();
         // Painting is deliberate: movement alone never changes the map.
         if (Input.GetMouseButton(0) && TryGetMapHit(playerObject.transform, out RaycastHit playerHit))
         {
             if (AddPaintStamp(playerHit.point, selectedColor, ref hasPlayerStamp, ref lastPlayerStamp, "Player Paint"))
-                PaintAt(playerHit.textureCoord, selectedColor, 0);
+            {
+                if (multiplayerActive) OnMultiplayerPaintRequested?.Invoke(playerHit.textureCoord, selectedColor, multiplayerTeam);
+                else PaintAt(playerHit.textureCoord, selectedColor, 0);
+            }
         }
-        if (TryGetMapHit(rivalObject.transform, out RaycastHit rivalHit))
+        if (!multiplayerActive && TryGetMapHit(rivalObject.transform, out RaycastHit rivalHit))
         {
             int rivalColor = TargetPaletteAt(rivalHit.textureCoord);
             if (AddPaintStamp(rivalHit.point, rivalColor, ref hasRivalStamp, ref lastRivalStamp, "Rival Paint"))
@@ -601,7 +606,14 @@ public sealed class BattlePrototypeController : MonoBehaviour
         playerVelocityY += Physics.gravity.y * Time.deltaTime;
         playerController.Move((moveDirection * 9f + Vector3.up * playerVelocityY) * Time.deltaTime);
         Vector3 constrained = playerObject.transform.position;
-        constrained.x = Mathf.Clamp(constrained.x, -BoardWidth * .5f + .5f, wallDown ? BoardWidth * .5f - .5f : -.45f);
+        float leftLimit = -BoardWidth * .5f + .5f;
+        float rightLimit = BoardWidth * .5f - .5f;
+        if (!wallDown)
+        {
+            if (multiplayerActive && multiplayerTeam == 1) leftLimit = .45f;
+            else rightLimit = -.45f;
+        }
+        constrained.x = Mathf.Clamp(constrained.x, leftLimit, rightLimit);
         constrained.z = Mathf.Clamp(constrained.z, -BoardDepth * .5f + .5f, BoardDepth * .5f - .5f);
         playerObject.transform.position = constrained;
         player = playerObject.transform.position - Vector3.up;
@@ -841,6 +853,53 @@ public sealed class BattlePrototypeController : MonoBehaviour
         foreach (LineRenderer trail in playerTrails) if (trail != null) Destroy(trail.gameObject);
         playerTrails.Clear(); activeTrail = activeRivalTrail = null;
         activeTrailColor = activeRivalTrailColor = -1;
+    }
+
+    public event Action<Vector2, int, int> OnMultiplayerPaintRequested;
+    public bool IsBattleReady => runtimeInitialized && playerObject != null && rivalObject != null;
+    public Vector3 LocalPlayerPosition => playerObject != null ? playerObject.transform.position : Vector3.zero;
+    public float RemainingSeconds => remaining;
+    public bool IsWallDown => wallDown;
+    public bool IsFinished => finished;
+
+    public void EnableMultiplayer(int team, bool isHost)
+    {
+        multiplayerActive = true;
+        multiplayerHost = isHost;
+        multiplayerTeam = team;
+        if (!IsBattleReady) return;
+        Vector3 localSpawn = team == 0 ? new Vector3(-BoardWidth * .37f, 0f, -BoardDepth * .28f) : new Vector3(BoardWidth * .37f, 0f, BoardDepth * .28f);
+        Vector3 remoteSpawn = team == 0 ? new Vector3(BoardWidth * .37f, 0f, BoardDepth * .28f) : new Vector3(-BoardWidth * .37f, 0f, -BoardDepth * .28f);
+        localSpawn.y = SampleTerrainHeight(localSpawn.x, localSpawn.z);
+        remoteSpawn.y = SampleTerrainHeight(remoteSpawn.x, remoteSpawn.z);
+        player = localSpawn;
+        rival = remoteSpawn;
+        playerObject.transform.position = localSpawn + Vector3.up;
+        rivalObject.transform.position = remoteSpawn + Vector3.up;
+        playerObject.GetComponent<Renderer>().material.color = team == 0 ? new Color(.12f, .55f, 1f) : new Color(1f, .2f, .3f);
+        rivalObject.GetComponent<Renderer>().material.color = team == 0 ? new Color(1f, .2f, .3f) : new Color(.12f, .55f, 1f);
+    }
+
+    public void ApplyRemotePlayerState(Vector3 position)
+    {
+        if (rivalObject == null) return;
+        rival = ClampToBoard(position - Vector3.up);
+        rival.y = SampleTerrainHeight(rival.x, rival.z);
+        rivalObject.transform.position = rival + Vector3.up;
+    }
+
+    public void ApplyNetworkPaint(Vector2 mapUv, int color, int owner)
+    {
+        if (color >= 0 && color < palette.Length) PaintAt(mapUv, color, owner);
+    }
+
+    public void ApplyNetworkClock(float seconds, bool barrierDown, bool matchFinished)
+    {
+        if (multiplayerHost) return;
+        remaining = Mathf.Clamp(seconds, 0f, TotalSeconds);
+        wallDown = barrierDown;
+        finished = matchFinished;
+        if (wallObject != null) wallObject.SetActive(!wallDown);
     }
 
     void OnGUI()
