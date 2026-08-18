@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using Unity.Netcode;
 using UnityEngine;
 using UnityEngine.Rendering;
 
@@ -66,6 +67,7 @@ public sealed class BattlePrototypeController : MonoBehaviour
     Collider mapFloorCollider;
     GameObject terrainObject, paintOverlayObject;
     GameObject playerObject, rivalObject, wallObject;
+    readonly Dictionary<ulong, GameObject> remotePlayerObjects = new Dictionary<ulong, GameObject>();
     Transform playerVisualPivot, rivalVisualPivot;
     Vector3 playerVisualBasePosition, rivalVisualBasePosition;
     bool rivalIsMoving;
@@ -97,6 +99,12 @@ public sealed class BattlePrototypeController : MonoBehaviour
     {
         if (FindObjectOfType<BattlePrototypeController>() == null)
             new GameObject("Battle Prototype").AddComponent<BattlePrototypeController>();
+
+        // The battle scene is also opened directly for offline iteration, so keep
+        // the bridge runtime-only and add it only when NGO already has a session.
+        if (NetworkManager.Singleton != null && NetworkManager.Singleton.IsListening &&
+            FindObjectOfType<ColorClashNetworkBridge>() == null)
+            new GameObject("Color Clash Network Bridge").AddComponent<ColorClashNetworkBridge>();
     }
 
     void Awake()
@@ -1002,9 +1010,11 @@ public sealed class BattlePrototypeController : MonoBehaviour
         player = localSpawn;
         rival = remoteSpawn;
         playerObject.transform.position = localSpawn + Vector3.up;
+        // The offline AI body is replaced by one independently synchronized body
+        // for every remote network player (up to three in a 4-player match).
+        rivalObject.SetActive(false);
         rivalObject.transform.position = remoteSpawn + Vector3.up;
-        playerObject.GetComponent<Renderer>().material.color = team == 0 ? new Color(.12f, .55f, 1f) : new Color(1f, .2f, .3f);
-        rivalObject.GetComponent<Renderer>().material.color = team == 0 ? new Color(1f, .2f, .3f) : new Color(.12f, .55f, 1f);
+        SetActorColour(playerObject, TeamColour(team));
     }
 
     public void ApplyRemotePlayerState(Vector3 position)
@@ -1013,6 +1023,33 @@ public sealed class BattlePrototypeController : MonoBehaviour
         rival = ClampToBoard(position - Vector3.up);
         rival.y = SampleTerrainHeight(rival.x, rival.z);
         rivalObject.transform.position = rival + Vector3.up;
+    }
+
+    public void ApplyRemotePlayerState(ulong clientId, Vector3 position, int team)
+    {
+        if (clientId == 0 && !multiplayerHost) return;
+        if (!remotePlayerObjects.TryGetValue(clientId, out GameObject remote) || remote == null)
+        {
+            remote = CreateActor($"Remote Player {clientId}", TeamColour(team), Vector3.zero, rivalRoot, playerModel);
+            remotePlayerObjects[clientId] = remote;
+        }
+
+        Vector3 terrainPosition = ClampToBoard(position - Vector3.up);
+        terrainPosition.y = SampleTerrainHeight(terrainPosition.x, terrainPosition.z);
+        remote.transform.position = terrainPosition + Vector3.up;
+        SetActorColour(remote, TeamColour(team));
+    }
+
+    static Color TeamColour(int team)
+    {
+        return team == 0 ? new Color(.12f, .55f, 1f) : new Color(1f, .2f, .3f);
+    }
+
+    static void SetActorColour(GameObject actor, Color colour)
+    {
+        if (actor == null) return;
+        foreach (Renderer renderer in actor.GetComponentsInChildren<Renderer>(true))
+            renderer.material.color = colour;
     }
 
     public void ApplyNetworkPaint(Vector2 mapUv, int color, int owner)
