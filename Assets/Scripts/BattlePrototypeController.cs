@@ -38,6 +38,10 @@ public sealed class BattlePrototypeController : MonoBehaviour
     [Header("Painting")]
     [Tooltip("World-space radius painted beneath a player. 1.25 is slightly wider than the current slime body.")]
     [SerializeField, Range(.3f, 3f)] float paintRadius = 1.25f;
+    [Header("Correct Paint Skill")]
+    [Tooltip("Press R to correctly paint every target colour in this circular area around the player.")]
+    [SerializeField, Range(2f, 16f)] float correctPaintSkillRadius = 7f;
+    [SerializeField, Range(1f, 60f)] float correctPaintSkillCooldownSeconds = 20f;
     [Header("Jump / Glide")]
     [Tooltip("Initial upward speed when SPACE is pressed from the ground.")]
     [SerializeField, Range(1f, 10f)] float jumpInitialVelocity = 3f;
@@ -95,6 +99,7 @@ public sealed class BattlePrototypeController : MonoBehaviour
     Vector3 rival = new Vector3(22f, 0f, 10f);
     Vector3 rivalDestination = new Vector3(22f, 0f, 10f);
     float playerVelocityY, glideSecondsRemaining, rivalTurn, remaining = TotalSeconds;
+    float correctPaintSkillCooldownRemaining;
     float cameraYaw, cameraPitch = 16f;
     float desiredCameraDistance = ThirdPersonDistance;
     int selectedColor;
@@ -696,6 +701,7 @@ public sealed class BattlePrototypeController : MonoBehaviour
         if (playerObject == null || rivalObject == null) return;
         if (finished) { if (Input.GetKeyDown(KeyCode.R) && (!multiplayerActive || multiplayerHost)) Restart(); return; }
         if (!multiplayerActive || multiplayerHost) remaining = Mathf.Max(0f, remaining - Time.deltaTime);
+        correctPaintSkillCooldownRemaining = Mathf.Max(0f, correctPaintSkillCooldownRemaining - Time.deltaTime);
         if (!wallDown && remaining <= WallFallsAt) { wallDown = true; wallObject.SetActive(false); }
         MovePlayer();
         if (!multiplayerActive) MoveRival();
@@ -717,6 +723,8 @@ public sealed class BattlePrototypeController : MonoBehaviour
             if (AddPaintStamp(rivalHit.point, rivalColor, ref hasRivalStamp, ref lastRivalStamp, "Rival Paint"))
                 PaintAt(rivalHit.textureCoord, rivalColor, 1);
         }
+        if (Input.GetKeyDown(KeyCode.R) && correctPaintSkillCooldownRemaining <= 0f)
+            TryUseCorrectPaintSkill();
         if (remaining <= 0f) finished = true;
     }
 
@@ -817,6 +825,37 @@ public sealed class BattlePrototypeController : MonoBehaviour
         }
         coverageDirty = true;
         RefreshPaintTexture();
+    }
+
+    // This skill paints the actual target palette colour for every map cell it
+    // reaches; it is not tied to the colour currently selected with Q / E.
+    void TryUseCorrectPaintSkill()
+    {
+        if (!TryGetMapHit(playerObject.transform, out RaycastHit hit) || targets == null) return;
+
+        Vector2 mapUv = hit.textureCoord;
+        int centerX = Mathf.Clamp(Mathf.FloorToInt(mapUv.x * Width), 0, Width - 1);
+        int centerZ = Mathf.Clamp(Mathf.FloorToInt(mapUv.y * Height), 0, Height - 1);
+        int radiusX = Mathf.CeilToInt(correctPaintSkillRadius / (BoardWidth / Width));
+        int radiusZ = Mathf.CeilToInt(correctPaintSkillRadius / (BoardDepth / Height));
+        int owner = multiplayerActive ? multiplayerTeam : 0;
+
+        for (int z = centerZ - radiusZ; z <= centerZ + radiusZ; z++)
+        for (int x = centerX - radiusX; x <= centerX + radiusX; x++)
+        {
+            if (x < 0 || z < 0 || x >= Width || z >= Height) continue;
+            float dx = ((x + .5f) / Width - mapUv.x) * BoardWidth;
+            float dz = ((z + .5f) / Height - mapUv.y) * BoardDepth;
+            if (dx * dx + dz * dz > correctPaintSkillRadius * correctPaintSkillRadius) continue;
+
+            int index = Index(x, z);
+            paint[index] = targets[index];
+            paintOwner[index] = owner;
+        }
+
+        coverageDirty = true;
+        RefreshPaintTexture();
+        correctPaintSkillCooldownRemaining = correctPaintSkillCooldownSeconds;
     }
 
     void RefreshPaintTexture()
@@ -1003,7 +1042,7 @@ public sealed class BattlePrototypeController : MonoBehaviour
     void Restart()
     {
         remaining = TotalSeconds; wallDown = finished = false; selectedColor = 0;
-        playerVelocityY = glideSecondsRemaining = 0f;
+        playerVelocityY = glideSecondsRemaining = correctPaintSkillCooldownRemaining = 0f;
         player = new Vector3(-BoardWidth * .37f, SampleTerrainHeight(-BoardWidth * .37f, -BoardDepth * .28f), -BoardDepth * .28f);
         rival = rivalDestination = new Vector3(BoardWidth * .37f, SampleTerrainHeight(BoardWidth * .37f, BoardDepth * .28f), BoardDepth * .28f);
         playerObject.transform.position = player + Vector3.up;
@@ -1107,7 +1146,7 @@ public sealed class BattlePrototypeController : MonoBehaviour
 
         GetCoverage(0, out int blueTotal, out int bluePainted, out int blueCorrect, out int blueWrong, out int blueForeign);
         GetCoverage(1, out int redTotal, out int redPainted, out int redCorrect, out int redWrong, out int redForeign);
-        GUI.Box(new Rect(16, 12, 680, 136), GUIContent.none);
+        GUI.Box(new Rect(16, 12, 680, 158), GUIContent.none);
         GUI.Label(new Rect(24, 18, 550, 32), "COLOR CLASH  ·  3D BATTLE PROTOTYPE", title);
         GUI.Label(new Rect(24, 50, 130, 24), $"남은 시간 {Mathf.CeilToInt(remaining):00}s", text);
         GUI.Label(new Rect(172, 50, 170, 24), $"BLUE TEAM  {blueScore:0.0}%", text);
@@ -1119,7 +1158,9 @@ public sealed class BattlePrototypeController : MonoBehaviour
         GUI.Label(new Rect(310, 77, 370, 20), wallDown ? "장벽 붕괴 — 자유 이동" : "장벽 유지 중", small);
         GUI.Label(new Rect(24, 105, 640, 18), $"[점수 검증] BLUE  칠함 {100f * bluePainted / blueTotal:0.0}% · 정답 {100f * blueCorrect / blueTotal:0.0}% · 오답 {100f * blueWrong / blueTotal:0.0}% · 상대흔적 {blueForeign}", small);
         GUI.Label(new Rect(24, 126, 640, 18), $"[점수 검증] RED     칠함 {100f * redPainted / redTotal:0.0}% · 정답 {100f * redCorrect / redTotal:0.0}% · 오답 {100f * redWrong / redTotal:0.0}% · 상대흔적 {redForeign}", small);
-        GUI.Label(new Rect(24, Screen.height - 48, 920, 24), "WASD 이동하면 자동 색칠 · 우클릭 드래그 시점 회전 · Q / E 색상 변경 · SPACE 길게 눌러 활공", text);
+        string skillState = correctPaintSkillCooldownRemaining <= 0f ? "준비" : $"{Mathf.CeilToInt(correctPaintSkillCooldownRemaining)}초";
+        GUI.Label(new Rect(24, 147, 640, 18), $"[R] 정답 범위 색칠  ·  쿨타임 {skillState}", small);
+        GUI.Label(new Rect(24, Screen.height - 48, 920, 24), "WASD 이동하면 자동 색칠 · R 정답 범위 색칠 · 우클릭 드래그 시점 회전 · Q / E 색상 변경 · SPACE 길게 눌러 활공", text);
         if (finished)
         {
             GUI.Box(new Rect(Screen.width / 2 - 170, Screen.height / 2 - 55, 340, 110), GUIContent.none);
