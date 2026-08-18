@@ -12,6 +12,18 @@ using UnityEngine.Rendering;
 [ExecuteAlways]
 public sealed class BattlePrototypeController : MonoBehaviour
 {
+    enum ItemType { MoveSpeed, PaintSize, SkillCooldown, SkillRange }
+
+    sealed class DroppedItem
+    {
+        public GameObject gameObject;
+        public Vector3 startPosition;
+        public Vector3 landingPosition;
+        public float fallProgress;
+        public float remainingLifetime;
+        public ItemType type;
+    }
+
     const int Width = 384;
     const int Height = 384;
     const float ThirdPersonDistance = 8f;
@@ -40,7 +52,7 @@ public sealed class BattlePrototypeController : MonoBehaviour
     [SerializeField, Range(.3f, 3f)] float paintRadius = 1.25f;
     [Header("Correct Paint Skill")]
     [Tooltip("Press R to correctly paint every target colour in this circular area around the player.")]
-    [SerializeField, Range(2f, 16f)] float correctPaintSkillRadius = 7f;
+    [SerializeField, Range(2f, 12f)] float correctPaintSkillRadius = 7f;
     [SerializeField, Range(1f, 60f)] float correctPaintSkillCooldownSeconds = 20f;
     [Header("Player Interaction")]
     [Tooltip("Left-click while an opponent is in front of you to shove them away.")]
@@ -53,6 +65,21 @@ public sealed class BattlePrototypeController : MonoBehaviour
     [Header("Debug Cheats")]
     [Tooltip("Press B during play to immediately remove the central barrier. Disable before a public build if desired.")]
     [SerializeField] bool enableBarrierBreakCheat = true;
+    [Header("Item Drops (Prototype)")]
+    [Tooltip("Two random prototype items fall at this interval: one on each side of the barrier.")]
+    [SerializeField, Range(3f, 60f)] float itemDropIntervalSeconds = 10f;
+    // A brief overlap is allowed because each pair lives ten seconds after landing.
+    [SerializeField, Range(2, 16)] int maximumItemsOnField = 4;
+    [SerializeField, Range(3f, 30f)] float itemDropHeight = 12f;
+    [SerializeField, Range(.15f, 2f)] float itemFallDuration = .65f;
+    [SerializeField, Range(3f, 30f)] float itemLifetimeSeconds = 10f;
+    [SerializeField, Range(.5f, 5f)] float itemBlinkDurationSeconds = 2f;
+    [Header("Item Upgrade Values")]
+    [SerializeField, Range(.1f, 2f)] float moveSpeedIncreasePerItem = .5f;
+    [SerializeField, Range(.05f, 1f)] float paintRadiusIncreasePerItem = .2f;
+    [SerializeField, Range(.02f, .5f)] float characterScaleIncreasePerItem = .1f;
+    [SerializeField, Range(1f, 3f)] float maximumCharacterScale = 1.6f;
+    [SerializeField, Range(1f, 15f)] float minimumRSkillCooldownSeconds = 5f;
     [Header("Jump / Glide")]
     [Tooltip("Initial upward speed when SPACE is pressed from the ground.")]
     [SerializeField, Range(1f, 10f)] float jumpInitialVelocity = 3f;
@@ -98,6 +125,7 @@ public sealed class BattlePrototypeController : MonoBehaviour
     bool rivalIsMoving;
     CharacterController playerController;
     Transform mapRoot, playerRoot, rivalRoot, environmentRoot;
+    Transform itemRoot;
     Transform editorPreviewRoot;
     Transform paintStampRoot;
     Vector3 lastPlayerStamp, lastRivalStamp;
@@ -113,9 +141,16 @@ public sealed class BattlePrototypeController : MonoBehaviour
     float correctPaintSkillCooldownRemaining;
     float shoveCooldownRemaining;
     float rivalStunRemaining;
+    float itemDropTimer;
+    float playerMoveSpeedBonus, rivalMoveSpeedBonus;
+    float playerPaintRadius, rivalPaintRadius;
+    float playerVisualScale = 1f, rivalVisualScale = 1f;
+    float activeCorrectPaintSkillRadius;
+    int rSkillCooldownLevel;
     float rivalShoveElapsed = -1f;
     float rivalShoveVisual;
     Vector3 rivalShoveStart, rivalShoveEnd;
+    readonly List<DroppedItem> droppedItems = new List<DroppedItem>();
     float cameraYaw, cameraPitch = 16f;
     float desiredCameraDistance = ThirdPersonDistance;
     int selectedColor;
@@ -209,7 +244,11 @@ public sealed class BattlePrototypeController : MonoBehaviour
         CreateUiHierarchy();
         editorPreviewRoot = transform.Find("Editor Preview");
         EnsurePlayerModelPreview();
-        if (editorPreviewRoot != null) return;
+        if (editorPreviewRoot != null)
+        {
+            CreateItemPreviews();
+            return;
+        }
         editorPreviewRoot = new GameObject("Editor Preview").transform;
         editorPreviewRoot.SetParent(transform);
 
@@ -228,6 +267,20 @@ public sealed class BattlePrototypeController : MonoBehaviour
         wall.transform.position = new Vector3(0f, 1.8f, 0f);
         wall.transform.localScale = new Vector3(.3f, 3.6f, BoardDepth);
         wall.GetComponent<Renderer>().material = NewColorMaterial(new Color(.85f, .92f, 1f));
+        CreateItemPreviews();
+    }
+
+    // These are edit-mode-only samples, so the intended item set is always
+    // visible in the Hierarchy before Play is pressed.
+    void CreateItemPreviews()
+    {
+        if (editorPreviewRoot == null || editorPreviewRoot.Find("Item Previews") != null) return;
+        Transform root = new GameObject("Item Previews").transform;
+        root.SetParent(editorPreviewRoot);
+        CreateItemVisual("01 Move Speed (+1)", ItemType.MoveSpeed, new Vector3(-8f, .8f, -5f), root, 1f);
+        CreateItemVisual("02 Paint Size (+radius)", ItemType.PaintSize, new Vector3(-2.5f, .8f, -5f), root, 1f);
+        CreateItemVisual("03 Skill Cooldown (-10%)", ItemType.SkillCooldown, new Vector3(3f, .8f, -5f), root, 1f);
+        CreateItemVisual("04 Skill Range (+1)", ItemType.SkillRange, new Vector3(8.5f, .8f, -5f), root, 1f);
     }
 
     void EnsurePlayerModelPreview()
@@ -282,6 +335,29 @@ public sealed class BattlePrototypeController : MonoBehaviour
         actor.transform.SetParent(editorPreviewRoot);
         actor.transform.position = position + Vector3.up;
         actor.GetComponent<Renderer>().material = NewColorMaterial(color);
+    }
+
+    GameObject CreateItemVisual(string name, ItemType type, Vector3 position, Transform parent, float scale)
+    {
+        GameObject item = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+        item.name = name;
+        item.transform.SetParent(parent);
+        item.transform.position = position;
+        item.transform.localScale = Vector3.one * scale;
+        item.GetComponent<Renderer>().material = NewColorMaterial(ItemColour(type));
+        return item;
+    }
+
+    static Color ItemColour(ItemType type)
+    {
+        return type switch
+        {
+            ItemType.MoveSpeed => new Color(.18f, .9f, 1f),       // cyan
+            ItemType.PaintSize => new Color(.35f, 1f, .3f),       // green
+            ItemType.SkillCooldown => new Color(.78f, .35f, 1f),  // purple
+            ItemType.SkillRange => new Color(1f, .58f, .12f),     // orange
+            _ => Color.white
+        };
     }
 
     void SetupCamera()
@@ -462,6 +538,9 @@ public sealed class BattlePrototypeController : MonoBehaviour
         playerRoot = GetContainer("Player");
         rivalRoot = GetContainer("Rival");
         environmentRoot = GetContainer("Environment");
+        itemRoot = GetContainer("Dropped Items");
+        itemDropTimer = itemDropIntervalSeconds;
+        ResetItemUpgrades();
         player = new Vector3(-BoardWidth * .37f, 0f, -BoardDepth * .28f);
         rival = rivalDestination = new Vector3(BoardWidth * .37f, 0f, BoardDepth * .28f);
         CreateFloor();
@@ -629,33 +708,33 @@ public sealed class BattlePrototypeController : MonoBehaviour
         actor.transform.SetParent(parent);
         actor.transform.position = position + Vector3.up;
         actor.layer = LayerMask.NameToLayer("Ignore Raycast");
+        Transform visualPivot = new GameObject("Visual Motion").transform;
+        visualPivot.SetParent(actor.transform, false);
         if (modelPrefab != null)
         {
-            Transform visualPivot = new GameObject("Visual Motion").transform;
-            visualPivot.SetParent(actor.transform, false);
             GameObject model = Instantiate(modelPrefab, visualPivot);
             model.name = "Slime Model";
             model.transform.localPosition = Vector3.zero;
             model.transform.localRotation = Quaternion.Euler(playerModelRotation);
             NormalizeModel(model.transform, 2f);
-            if (parent == playerRoot)
-            {
-                playerVisualPivot = visualPivot;
-                playerVisualBasePosition = visualPivot.localPosition;
-            }
-            else if (parent == rivalRoot)
-            {
-                rivalVisualPivot = visualPivot;
-                rivalVisualBasePosition = visualPivot.localPosition;
-            }
         }
         else
         {
             GameObject visual = GameObject.CreatePrimitive(PrimitiveType.Capsule);
             visual.name = "Capsule Visual";
-            visual.transform.SetParent(actor.transform, false);
+            visual.transform.SetParent(visualPivot, false);
             Destroy(visual.GetComponent<CapsuleCollider>());
             visual.GetComponent<Renderer>().material.color = color;
+        }
+        if (parent == playerRoot)
+        {
+            playerVisualPivot = visualPivot;
+            playerVisualBasePosition = visualPivot.localPosition;
+        }
+        else if (parent == rivalRoot)
+        {
+            rivalVisualPivot = visualPivot;
+            rivalVisualBasePosition = visualPivot.localPosition;
         }
         return actor;
     }
@@ -665,11 +744,11 @@ public sealed class BattlePrototypeController : MonoBehaviour
         float horizontal = (Input.GetKey(KeyCode.D) ? 1f : 0f) - (Input.GetKey(KeyCode.A) ? 1f : 0f);
         float vertical = (Input.GetKey(KeyCode.W) ? 1f : 0f) - (Input.GetKey(KeyCode.S) ? 1f : 0f);
         bool isMoving = horizontal * horizontal + vertical * vertical > .01f;
-        AnimateSlimeVisual(playerVisualPivot, playerVisualBasePosition, isMoving, 0f, 0f);
-        AnimateSlimeVisual(rivalVisualPivot, rivalVisualBasePosition, rivalIsMoving, 1.7f, rivalShoveVisual);
+        AnimateSlimeVisual(playerVisualPivot, playerVisualBasePosition, isMoving, 0f, 0f, playerVisualScale);
+        AnimateSlimeVisual(rivalVisualPivot, rivalVisualBasePosition, rivalIsMoving, 1.7f, rivalShoveVisual, rivalVisualScale);
     }
 
-    static void AnimateSlimeVisual(Transform visual, Vector3 basePosition, bool isMoving, float phaseOffset, float hitReaction)
+    static void AnimateSlimeVisual(Transform visual, Vector3 basePosition, bool isMoving, float phaseOffset, float hitReaction, float sizeMultiplier)
     {
         if (visual == null) return;
         float phase = Time.time * (isMoving ? 10f : 2.2f) + phaseOffset;
@@ -679,7 +758,7 @@ public sealed class BattlePrototypeController : MonoBehaviour
         // During knockback, the slime flattens and widens, then springs back
         // before the sliding movement finishes.
         float hitSquash = hitReaction * .32f;
-        Vector3 targetScale = new Vector3(1f + squash + hitSquash, 1f - squash - hitSquash, 1f + squash + hitSquash);
+        Vector3 targetScale = new Vector3(1f + squash + hitSquash, 1f - squash - hitSquash, 1f + squash + hitSquash) * sizeMultiplier;
         Vector3 targetPosition = basePosition + Vector3.up * (bounce + hitReaction * .09f);
 
         visual.localScale = Vector3.Lerp(visual.localScale, targetScale, 14f * Time.deltaTime);
@@ -724,9 +803,11 @@ public sealed class BattlePrototypeController : MonoBehaviour
         shoveCooldownRemaining = Mathf.Max(0f, shoveCooldownRemaining - Time.deltaTime);
         if (enableBarrierBreakCheat && Input.GetKeyDown(KeyCode.B) && (!multiplayerActive || multiplayerHost))
             BreakBarrierImmediately();
+        UpdateItemDrops();
         if (!wallDown && remaining <= WallFallsAt) { wallDown = true; wallObject.SetActive(false); }
         MovePlayer();
         if (!multiplayerActive) MoveRival();
+        TryCollectDroppedItems();
         AnimatePlayerVisual();
         // Walking paints automatically. Jumping and gliding never paint, even if
         // the ray can still reach the ground below the airborne character.
@@ -736,14 +817,14 @@ public sealed class BattlePrototypeController : MonoBehaviour
             if (AddPaintStamp(playerHit.point, selectedColor, ref hasPlayerStamp, ref lastPlayerStamp, "Player Paint"))
             {
                 if (multiplayerActive) OnMultiplayerPaintRequested?.Invoke(playerHit.textureCoord, selectedColor, multiplayerTeam);
-                else PaintAt(playerHit.textureCoord, selectedColor, 0);
+                else PaintAt(playerHit.textureCoord, selectedColor, 0, playerPaintRadius);
             }
         }
         if (!multiplayerActive && TryGetMapHit(rivalObject.transform, out RaycastHit rivalHit))
         {
             int rivalColor = TargetPaletteAt(rivalHit.textureCoord);
             if (AddPaintStamp(rivalHit.point, rivalColor, ref hasRivalStamp, ref lastRivalStamp, "Rival Paint"))
-                PaintAt(rivalHit.textureCoord, rivalColor, 1);
+                PaintAt(rivalHit.textureCoord, rivalColor, 1, rivalPaintRadius);
         }
         if (Input.GetKeyDown(KeyCode.R) && correctPaintSkillCooldownRemaining <= 0f)
             TryUseCorrectPaintSkill();
@@ -787,7 +868,7 @@ public sealed class BattlePrototypeController : MonoBehaviour
         if (isGliding) glideSecondsRemaining = Mathf.Max(0f, glideSecondsRemaining - Time.deltaTime);
         else if (!Input.GetKey(KeyCode.Space) || playerVelocityY <= 0f) glideSecondsRemaining = 0f;
         playerVelocityY += Physics.gravity.y * (isGliding ? glideGravityMultiplier : 1f) * Time.deltaTime;
-        playerController.Move((moveDirection * 9f + Vector3.up * playerVelocityY) * Time.deltaTime);
+        playerController.Move((moveDirection * (9f + playerMoveSpeedBonus) + Vector3.up * playerVelocityY) * Time.deltaTime);
         Vector3 constrained = playerObject.transform.position;
         float leftLimit = -BoardWidth * .5f + .5f;
         float rightLimit = BoardWidth * .5f - .5f;
@@ -841,7 +922,7 @@ public sealed class BattlePrototypeController : MonoBehaviour
         }
         if (!wallDown) rivalDestination.x = Mathf.Max(rivalDestination.x, .45f);
         Vector3 previousPosition = rival;
-        rival = Vector3.MoveTowards(rival, rivalDestination, 4.5f * Time.deltaTime);
+        rival = Vector3.MoveTowards(rival, rivalDestination, (4.5f + rivalMoveSpeedBonus) * Time.deltaTime);
         Vector3 moveDirection = rival - previousPosition;
         moveDirection.y = 0f;
         rivalIsMoving = moveDirection.sqrMagnitude > .000001f;
@@ -857,21 +938,171 @@ public sealed class BattlePrototypeController : MonoBehaviour
         rivalObject.transform.position = rival + Vector3.up;
     }
 
+    void UpdateItemDrops()
+    {
+        for (int i = droppedItems.Count - 1; i >= 0; i--)
+        {
+            DroppedItem item = droppedItems[i];
+            if (item.gameObject == null)
+            {
+                droppedItems.RemoveAt(i);
+                continue;
+            }
+
+            item.fallProgress = Mathf.Min(1f, item.fallProgress + Time.deltaTime / Mathf.Max(.01f, itemFallDuration));
+            float eased = 1f - Mathf.Pow(1f - item.fallProgress, 3f);
+            item.gameObject.transform.position = Vector3.Lerp(item.startPosition, item.landingPosition, eased);
+            item.gameObject.transform.Rotate(0f, 160f * Time.deltaTime, 0f, Space.World);
+
+            // The ten-second lifetime begins once the item reaches the floor.
+            if (item.fallProgress >= 1f)
+            {
+                item.remainingLifetime -= Time.deltaTime;
+                if (item.remainingLifetime <= 0f)
+                {
+                    Destroy(item.gameObject);
+                    droppedItems.RemoveAt(i);
+                    continue;
+                }
+
+                bool blink = item.remainingLifetime <= itemBlinkDurationSeconds &&
+                             Mathf.Repeat(Time.time * 8f, 1f) < .5f;
+                foreach (Renderer renderer in item.gameObject.GetComponentsInChildren<Renderer>())
+                    renderer.enabled = !blink;
+            }
+        }
+
+        // Only the current authority creates drops. This keeps the temporary
+        // multiplayer prototype from creating a separate random item set per client.
+        if (multiplayerActive && !multiplayerHost) return;
+        itemDropTimer -= Time.deltaTime;
+        if (itemDropTimer > 0f) return;
+        itemDropTimer = itemDropIntervalSeconds;
+        DropBalancedPrototypeItems();
+    }
+
+    void DropBalancedPrototypeItems()
+    {
+        if (itemRoot == null) return;
+        while (droppedItems.Count + 2 > maximumItemsOnField && droppedItems.Count > 0)
+        {
+            DroppedItem oldest = droppedItems[0];
+            if (oldest.gameObject != null) Destroy(oldest.gameObject);
+            droppedItems.RemoveAt(0);
+        }
+
+        // One item is always placed on each side of the centre barrier. This
+        // preserves equal access during the separated first half of a match.
+        DropPrototypeItemOnSide(-1);
+        DropPrototypeItemOnSide(1);
+    }
+
+    void DropPrototypeItemOnSide(int side)
+    {
+        ItemType type = (ItemType)UnityEngine.Random.Range(0, 4);
+        float x = UnityEngine.Random.Range(BoardWidth * .10f, BoardWidth * .44f) * Mathf.Sign(side);
+        float z = UnityEngine.Random.Range(-BoardDepth * .46f, BoardDepth * .46f);
+        Vector3 landingPosition = new Vector3(x, SampleTerrainHeight(x, z) + .55f, z);
+        GameObject itemObject = CreateItemVisual($"{type} Item ({(side < 0 ? "Blue Side" : "Red Side")})", type, landingPosition + Vector3.up * itemDropHeight, itemRoot, .7f);
+        droppedItems.Add(new DroppedItem
+        {
+            gameObject = itemObject,
+            startPosition = itemObject.transform.position,
+            landingPosition = landingPosition,
+            fallProgress = 0f,
+            remainingLifetime = itemLifetimeSeconds,
+            type = type
+        });
+    }
+
+    void TryCollectDroppedItems()
+    {
+        // Item authority is server-side in the final online build. The local
+        // prototype applies pickups only in the offline test match for now.
+        if (multiplayerActive) return;
+        for (int i = droppedItems.Count - 1; i >= 0; i--)
+        {
+            DroppedItem item = droppedItems[i];
+            if (item.gameObject == null || item.fallProgress < 1f) continue;
+            if (HorizontalDistance(playerObject.transform.position, item.gameObject.transform.position) <= 1.15f)
+            {
+                ApplyItemUpgrade(item.type, 0);
+                Destroy(item.gameObject);
+                droppedItems.RemoveAt(i);
+            }
+            else if (HorizontalDistance(rivalObject.transform.position, item.gameObject.transform.position) <= 1.15f)
+            {
+                ApplyItemUpgrade(item.type, 1);
+                Destroy(item.gameObject);
+                droppedItems.RemoveAt(i);
+            }
+        }
+    }
+
+    static float HorizontalDistance(Vector3 a, Vector3 b)
+    {
+        a.y = b.y = 0f;
+        return Vector3.Distance(a, b);
+    }
+
+    void ApplyItemUpgrade(ItemType type, int owner)
+    {
+        if (owner == 0)
+        {
+            switch (type)
+            {
+                case ItemType.MoveSpeed: playerMoveSpeedBonus += moveSpeedIncreasePerItem; break;
+                case ItemType.PaintSize:
+                    playerPaintRadius = Mathf.Min(3f, playerPaintRadius + paintRadiusIncreasePerItem);
+                    playerVisualScale = Mathf.Min(maximumCharacterScale, playerVisualScale + characterScaleIncreasePerItem);
+                    break;
+                case ItemType.SkillCooldown: rSkillCooldownLevel++; break;
+                case ItemType.SkillRange:
+                    activeCorrectPaintSkillRadius = Mathf.Min(12f, activeCorrectPaintSkillRadius + 1f);
+                    break;
+            }
+            return;
+        }
+
+        // The offline AI receives the movement/paint upgrades too. Its future
+        // active-skill system will use the same cooldown/range data as a player.
+        if (type == ItemType.MoveSpeed) rivalMoveSpeedBonus += moveSpeedIncreasePerItem;
+        if (type == ItemType.PaintSize)
+        {
+            rivalPaintRadius = Mathf.Min(3f, rivalPaintRadius + paintRadiusIncreasePerItem);
+            rivalVisualScale = Mathf.Min(maximumCharacterScale, rivalVisualScale + characterScaleIncreasePerItem);
+        }
+    }
+
+    void ResetItemUpgrades()
+    {
+        playerMoveSpeedBonus = rivalMoveSpeedBonus = 0f;
+        playerPaintRadius = rivalPaintRadius = paintRadius;
+        playerVisualScale = rivalVisualScale = 1f;
+        activeCorrectPaintSkillRadius = correctPaintSkillRadius;
+        rSkillCooldownLevel = 0;
+    }
+
     // Painting is intentionally independent of territory and the barrier.
     // Each actor always paints the ground directly below their current 3D position.
     void PaintAt(Vector2 mapUv, int color, int owner)
     {
+        PaintAt(mapUv, color, owner, paintRadius);
+    }
+
+    void PaintAt(Vector2 mapUv, int color, int owner, float radius)
+    {
         int cx = Mathf.Clamp(Mathf.FloorToInt(mapUv.x * Width), 0, Width - 1);
         int cz = Mathf.Clamp(Mathf.FloorToInt(mapUv.y * Height), 0, Height - 1);
-        int radiusX = Mathf.CeilToInt(paintRadius / (BoardWidth / Width));
-        int radiusZ = Mathf.CeilToInt(paintRadius / (BoardDepth / Height));
+        int radiusX = Mathf.CeilToInt(radius / (BoardWidth / Width));
+        int radiusZ = Mathf.CeilToInt(radius / (BoardDepth / Height));
         for (int z = cz - radiusZ; z <= cz + radiusZ; z++)
         for (int x = cx - radiusX; x <= cx + radiusX; x++)
         {
             if (x < 0 || z < 0 || x >= Width || z >= Height) continue;
             float dx = ((x + .5f) / Width - mapUv.x) * BoardWidth;
             float dz = ((z + .5f) / Height - mapUv.y) * BoardDepth;
-            if (dx * dx + dz * dz > paintRadius * paintRadius) continue;
+            if (dx * dx + dz * dz > radius * radius) continue;
             int index = Index(x, z);
             paint[index] = palette[color];
             paintOwner[index] = owner;
@@ -889,8 +1120,8 @@ public sealed class BattlePrototypeController : MonoBehaviour
         Vector2 mapUv = hit.textureCoord;
         int centerX = Mathf.Clamp(Mathf.FloorToInt(mapUv.x * Width), 0, Width - 1);
         int centerZ = Mathf.Clamp(Mathf.FloorToInt(mapUv.y * Height), 0, Height - 1);
-        int radiusX = Mathf.CeilToInt(correctPaintSkillRadius / (BoardWidth / Width));
-        int radiusZ = Mathf.CeilToInt(correctPaintSkillRadius / (BoardDepth / Height));
+        int radiusX = Mathf.CeilToInt(activeCorrectPaintSkillRadius / (BoardWidth / Width));
+        int radiusZ = Mathf.CeilToInt(activeCorrectPaintSkillRadius / (BoardDepth / Height));
         int owner = multiplayerActive ? multiplayerTeam : 0;
 
         for (int z = centerZ - radiusZ; z <= centerZ + radiusZ; z++)
@@ -899,7 +1130,7 @@ public sealed class BattlePrototypeController : MonoBehaviour
             if (x < 0 || z < 0 || x >= Width || z >= Height) continue;
             float dx = ((x + .5f) / Width - mapUv.x) * BoardWidth;
             float dz = ((z + .5f) / Height - mapUv.y) * BoardDepth;
-            if (dx * dx + dz * dz > correctPaintSkillRadius * correctPaintSkillRadius) continue;
+            if (dx * dx + dz * dz > activeCorrectPaintSkillRadius * activeCorrectPaintSkillRadius) continue;
 
             int index = Index(x, z);
             paint[index] = targets[index];
@@ -908,7 +1139,7 @@ public sealed class BattlePrototypeController : MonoBehaviour
 
         coverageDirty = true;
         RefreshPaintTexture();
-        correctPaintSkillCooldownRemaining = correctPaintSkillCooldownSeconds;
+        correctPaintSkillCooldownRemaining = Mathf.Max(minimumRSkillCooldownSeconds, correctPaintSkillCooldownSeconds * Mathf.Pow(.9f, rSkillCooldownLevel));
     }
 
     void BreakBarrierImmediately()
@@ -1150,6 +1381,11 @@ public sealed class BattlePrototypeController : MonoBehaviour
         rivalShoveElapsed = -1f;
         rivalShoveVisual = 0f;
         rivalStunRemaining = 0f;
+        itemDropTimer = itemDropIntervalSeconds;
+        ResetItemUpgrades();
+        foreach (DroppedItem item in droppedItems)
+            if (item.gameObject != null) Destroy(item.gameObject);
+        droppedItems.Clear();
         player = new Vector3(-BoardWidth * .37f, SampleTerrainHeight(-BoardWidth * .37f, -BoardDepth * .28f), -BoardDepth * .28f);
         rival = rivalDestination = new Vector3(BoardWidth * .37f, SampleTerrainHeight(BoardWidth * .37f, BoardDepth * .28f), BoardDepth * .28f);
         playerObject.transform.position = player + Vector3.up;
