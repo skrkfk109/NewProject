@@ -42,6 +42,17 @@ public sealed class BattlePrototypeController : MonoBehaviour
     [Tooltip("Press R to correctly paint every target colour in this circular area around the player.")]
     [SerializeField, Range(2f, 16f)] float correctPaintSkillRadius = 7f;
     [SerializeField, Range(1f, 60f)] float correctPaintSkillCooldownSeconds = 20f;
+    [Header("Player Interaction")]
+    [Tooltip("Left-click while an opponent is in front of you to shove them away.")]
+    [SerializeField, Range(1f, 4f)] float shoveRange = 2.25f;
+    [SerializeField, Range(1f, 8f)] float shoveDistance = 3.25f;
+    [SerializeField, Range(.25f, 10f)] float shoveCooldownSeconds = 3f;
+    [SerializeField, Range(.12f, 1f)] float shoveAnimationDuration = .38f;
+    [Tooltip("How long the opponent cannot choose or follow a movement path after a successful shove.")]
+    [SerializeField, Range(.1f, 3f)] float shoveStunSeconds = 1f;
+    [Header("Debug Cheats")]
+    [Tooltip("Press B during play to immediately remove the central barrier. Disable before a public build if desired.")]
+    [SerializeField] bool enableBarrierBreakCheat = true;
     [Header("Jump / Glide")]
     [Tooltip("Initial upward speed when SPACE is pressed from the ground.")]
     [SerializeField, Range(1f, 10f)] float jumpInitialVelocity = 3f;
@@ -100,6 +111,11 @@ public sealed class BattlePrototypeController : MonoBehaviour
     Vector3 rivalDestination = new Vector3(22f, 0f, 10f);
     float playerVelocityY, glideSecondsRemaining, rivalTurn, remaining = TotalSeconds;
     float correctPaintSkillCooldownRemaining;
+    float shoveCooldownRemaining;
+    float rivalStunRemaining;
+    float rivalShoveElapsed = -1f;
+    float rivalShoveVisual;
+    Vector3 rivalShoveStart, rivalShoveEnd;
     float cameraYaw, cameraPitch = 16f;
     float desiredCameraDistance = ThirdPersonDistance;
     int selectedColor;
@@ -649,19 +665,22 @@ public sealed class BattlePrototypeController : MonoBehaviour
         float horizontal = (Input.GetKey(KeyCode.D) ? 1f : 0f) - (Input.GetKey(KeyCode.A) ? 1f : 0f);
         float vertical = (Input.GetKey(KeyCode.W) ? 1f : 0f) - (Input.GetKey(KeyCode.S) ? 1f : 0f);
         bool isMoving = horizontal * horizontal + vertical * vertical > .01f;
-        AnimateSlimeVisual(playerVisualPivot, playerVisualBasePosition, isMoving, 0f);
-        AnimateSlimeVisual(rivalVisualPivot, rivalVisualBasePosition, rivalIsMoving, 1.7f);
+        AnimateSlimeVisual(playerVisualPivot, playerVisualBasePosition, isMoving, 0f, 0f);
+        AnimateSlimeVisual(rivalVisualPivot, rivalVisualBasePosition, rivalIsMoving, 1.7f, rivalShoveVisual);
     }
 
-    static void AnimateSlimeVisual(Transform visual, Vector3 basePosition, bool isMoving, float phaseOffset)
+    static void AnimateSlimeVisual(Transform visual, Vector3 basePosition, bool isMoving, float phaseOffset, float hitReaction)
     {
         if (visual == null) return;
         float phase = Time.time * (isMoving ? 10f : 2.2f) + phaseOffset;
         float wave = Mathf.Sin(phase);
         float bounce = isMoving ? Mathf.Max(0f, wave) * .16f : wave * .025f;
         float squash = isMoving ? wave * .09f : wave * .018f;
-        Vector3 targetScale = new Vector3(1f + squash, 1f - squash, 1f + squash);
-        Vector3 targetPosition = basePosition + Vector3.up * bounce;
+        // During knockback, the slime flattens and widens, then springs back
+        // before the sliding movement finishes.
+        float hitSquash = hitReaction * .32f;
+        Vector3 targetScale = new Vector3(1f + squash + hitSquash, 1f - squash - hitSquash, 1f + squash + hitSquash);
+        Vector3 targetPosition = basePosition + Vector3.up * (bounce + hitReaction * .09f);
 
         visual.localScale = Vector3.Lerp(visual.localScale, targetScale, 14f * Time.deltaTime);
         visual.localPosition = Vector3.Lerp(visual.localPosition, targetPosition, 14f * Time.deltaTime);
@@ -702,6 +721,9 @@ public sealed class BattlePrototypeController : MonoBehaviour
         if (finished) { if (Input.GetKeyDown(KeyCode.R) && (!multiplayerActive || multiplayerHost)) Restart(); return; }
         if (!multiplayerActive || multiplayerHost) remaining = Mathf.Max(0f, remaining - Time.deltaTime);
         correctPaintSkillCooldownRemaining = Mathf.Max(0f, correctPaintSkillCooldownRemaining - Time.deltaTime);
+        shoveCooldownRemaining = Mathf.Max(0f, shoveCooldownRemaining - Time.deltaTime);
+        if (enableBarrierBreakCheat && Input.GetKeyDown(KeyCode.B) && (!multiplayerActive || multiplayerHost))
+            BreakBarrierImmediately();
         if (!wallDown && remaining <= WallFallsAt) { wallDown = true; wallObject.SetActive(false); }
         MovePlayer();
         if (!multiplayerActive) MoveRival();
@@ -725,6 +747,8 @@ public sealed class BattlePrototypeController : MonoBehaviour
         }
         if (Input.GetKeyDown(KeyCode.R) && correctPaintSkillCooldownRemaining <= 0f)
             TryUseCorrectPaintSkill();
+        if (Input.GetMouseButtonDown(0) && shoveCooldownRemaining <= 0f)
+            TryUseShove();
         if (remaining <= 0f) finished = true;
     }
 
@@ -780,6 +804,35 @@ public sealed class BattlePrototypeController : MonoBehaviour
 
     void MoveRival()
     {
+        if (rivalShoveElapsed >= 0f)
+        {
+            rivalShoveElapsed += Time.deltaTime;
+            float t = Mathf.Clamp01(rivalShoveElapsed / shoveAnimationDuration);
+            float eased = 1f - Mathf.Pow(1f - t, 3f); // fast impact, gentle stop
+            rival = Vector3.Lerp(rivalShoveStart, rivalShoveEnd, eased);
+            rival.y = SampleTerrainHeight(rival.x, rival.z);
+            rivalObject.transform.position = rival + Vector3.up;
+            rivalIsMoving = true;
+            rivalShoveVisual = Mathf.Sin(t * Mathf.PI);
+            if (t >= 1f)
+            {
+                rivalShoveElapsed = -1f;
+                rivalShoveVisual = 0f;
+                // The one-second stun starts only after the knockback has
+                // fully finished, rather than running concurrently with it.
+                rivalStunRemaining = shoveStunSeconds;
+            }
+            return;
+        }
+
+        if (rivalStunRemaining > 0f)
+        {
+            rivalStunRemaining = Mathf.Max(0f, rivalStunRemaining - Time.deltaTime);
+            rivalIsMoving = false;
+            return;
+        }
+
+        rivalShoveVisual = 0f;
         rivalTurn -= Time.deltaTime;
         if (rivalTurn <= 0f)
         {
@@ -856,6 +909,57 @@ public sealed class BattlePrototypeController : MonoBehaviour
         coverageDirty = true;
         RefreshPaintTexture();
         correctPaintSkillCooldownRemaining = correctPaintSkillCooldownSeconds;
+    }
+
+    void BreakBarrierImmediately()
+    {
+        wallDown = true;
+        if (wallObject != null) wallObject.SetActive(false);
+    }
+
+    void TryUseShove()
+    {
+        if (playerObject == null) return;
+
+        Vector3 origin = playerObject.transform.position;
+        Vector3 forward = cameraTransform != null ? cameraTransform.forward : playerObject.transform.forward;
+        forward.y = 0f;
+        if (forward.sqrMagnitude < .001f) forward = playerObject.transform.forward;
+        forward.Normalize();
+
+        // The offline opponent is the first valid target. The same close-range
+        // rule is used for remote opponents when their visual bodies exist.
+        if (!multiplayerActive && TryShoveTarget(rivalObject, origin, forward, out Vector3 shovedPosition))
+        {
+            rivalShoveStart = rival;
+            rivalShoveEnd = shovedPosition - Vector3.up;
+            rivalShoveEnd.y = SampleTerrainHeight(rivalShoveEnd.x, rivalShoveEnd.z);
+            rivalDestination = rivalShoveEnd;
+            rivalShoveElapsed = 0f;
+            shoveCooldownRemaining = shoveCooldownSeconds;
+            return;
+        }
+
+        // Dedicated-server synchronization for shove is added with the final
+        // authoritative combat message. Until then, never locally move remote
+        // players: it would create a misleading client-only result.
+    }
+
+    bool TryShoveTarget(GameObject target, Vector3 origin, Vector3 forward, out Vector3 shovedPosition)
+    {
+        shovedPosition = default;
+        if (target == null || !target.activeInHierarchy) return false;
+
+        Vector3 toTarget = target.transform.position - origin;
+        toTarget.y = 0f;
+        float distance = toTarget.magnitude;
+        if (distance > shoveRange || distance < .01f) return false;
+        if (Vector3.Dot(forward, toTarget / distance) < .25f) return false;
+
+        Vector3 direction = (toTarget / distance + forward * .35f).normalized;
+        shovedPosition = ClampToBoard(target.transform.position + direction * shoveDistance);
+        shovedPosition.y = SampleTerrainHeight(shovedPosition.x, shovedPosition.z) + 1f;
+        return true;
     }
 
     void RefreshPaintTexture()
@@ -1042,7 +1146,10 @@ public sealed class BattlePrototypeController : MonoBehaviour
     void Restart()
     {
         remaining = TotalSeconds; wallDown = finished = false; selectedColor = 0;
-        playerVelocityY = glideSecondsRemaining = correctPaintSkillCooldownRemaining = 0f;
+        playerVelocityY = glideSecondsRemaining = correctPaintSkillCooldownRemaining = shoveCooldownRemaining = 0f;
+        rivalShoveElapsed = -1f;
+        rivalShoveVisual = 0f;
+        rivalStunRemaining = 0f;
         player = new Vector3(-BoardWidth * .37f, SampleTerrainHeight(-BoardWidth * .37f, -BoardDepth * .28f), -BoardDepth * .28f);
         rival = rivalDestination = new Vector3(BoardWidth * .37f, SampleTerrainHeight(BoardWidth * .37f, BoardDepth * .28f), BoardDepth * .28f);
         playerObject.transform.position = player + Vector3.up;
@@ -1146,7 +1253,7 @@ public sealed class BattlePrototypeController : MonoBehaviour
 
         GetCoverage(0, out int blueTotal, out int bluePainted, out int blueCorrect, out int blueWrong, out int blueForeign);
         GetCoverage(1, out int redTotal, out int redPainted, out int redCorrect, out int redWrong, out int redForeign);
-        GUI.Box(new Rect(16, 12, 680, 158), GUIContent.none);
+        GUI.Box(new Rect(16, 12, 680, 178), GUIContent.none);
         GUI.Label(new Rect(24, 18, 550, 32), "COLOR CLASH  ·  3D BATTLE PROTOTYPE", title);
         GUI.Label(new Rect(24, 50, 130, 24), $"남은 시간 {Mathf.CeilToInt(remaining):00}s", text);
         GUI.Label(new Rect(172, 50, 170, 24), $"BLUE TEAM  {blueScore:0.0}%", text);
@@ -1160,7 +1267,9 @@ public sealed class BattlePrototypeController : MonoBehaviour
         GUI.Label(new Rect(24, 126, 640, 18), $"[점수 검증] RED     칠함 {100f * redPainted / redTotal:0.0}% · 정답 {100f * redCorrect / redTotal:0.0}% · 오답 {100f * redWrong / redTotal:0.0}% · 상대흔적 {redForeign}", small);
         string skillState = correctPaintSkillCooldownRemaining <= 0f ? "준비" : $"{Mathf.CeilToInt(correctPaintSkillCooldownRemaining)}초";
         GUI.Label(new Rect(24, 147, 640, 18), $"[R] 정답 범위 색칠  ·  쿨타임 {skillState}", small);
-        GUI.Label(new Rect(24, Screen.height - 48, 920, 24), "WASD 이동하면 자동 색칠 · R 정답 범위 색칠 · 우클릭 드래그 시점 회전 · Q / E 색상 변경 · SPACE 길게 눌러 활공", text);
+        string shoveState = shoveCooldownRemaining <= 0f ? "준비" : $"{Mathf.CeilToInt(shoveCooldownRemaining)}초";
+        GUI.Label(new Rect(24, 166, 640, 18), $"[좌클릭] 전방 근접 밀치기  ·  쿨타임 {shoveState}", small);
+        GUI.Label(new Rect(24, Screen.height - 48, 1040, 24), "WASD 이동하면 자동 색칠 · 좌클릭 밀치기 · R 정답 범위 색칠 · B 장벽 즉시 붕괴(치트) · 우클릭 드래그 시점 회전 · Q / E 색상 변경 · SPACE 길게 눌러 활공", text);
         if (finished)
         {
             GUI.Box(new Rect(Screen.width / 2 - 170, Screen.height / 2 - 55, 340, 110), GUIContent.none);
