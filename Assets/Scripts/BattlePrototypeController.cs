@@ -38,6 +38,14 @@ public sealed class BattlePrototypeController : MonoBehaviour
     [Header("Painting")]
     [Tooltip("World-space radius painted beneath a player. 1.25 is slightly wider than the current slime body.")]
     [SerializeField, Range(.3f, 3f)] float paintRadius = 1.25f;
+    [Header("Jump / Glide")]
+    [Tooltip("Initial upward speed when SPACE is pressed from the ground.")]
+    [SerializeField, Range(1f, 10f)] float jumpInitialVelocity = 3f;
+    [Tooltip("Hold SPACE while rising to glide. Releasing SPACE ends it immediately; holding longer than this value has no extra effect.")]
+    [SerializeField, Range(.2f, 2f)] float maximumGlideSeconds = 2f;
+    [SerializeField, Range(.1f, 1f)] float glideGravityMultiplier = .5f;
+    [Tooltip("Upward speed kept when SPACE is released early. Lower values make a quick tap into a short hop.")]
+    [SerializeField, Range(0f, 1f)] float earlyReleaseUpwardVelocityMultiplier = .35f;
 
     float boardWidth = 60f;
     float boardDepth = 36f;
@@ -86,13 +94,14 @@ public sealed class BattlePrototypeController : MonoBehaviour
     Vector3 player = new Vector3(-22f, 0f, -10f);
     Vector3 rival = new Vector3(22f, 0f, 10f);
     Vector3 rivalDestination = new Vector3(22f, 0f, 10f);
-    float playerVelocityY, rivalTurn, remaining = TotalSeconds;
+    float playerVelocityY, glideSecondsRemaining, rivalTurn, remaining = TotalSeconds;
     float cameraYaw, cameraPitch = 16f;
     float desiredCameraDistance = ThirdPersonDistance;
     int selectedColor;
     bool wallDown, finished;
     bool multiplayerActive, multiplayerHost;
     int multiplayerTeam;
+    bool playerIsWalking;
     bool runtimeInitialized;
     readonly System.Random random = new System.Random(19);
 
@@ -691,8 +700,10 @@ public sealed class BattlePrototypeController : MonoBehaviour
         MovePlayer();
         if (!multiplayerActive) MoveRival();
         AnimatePlayerVisual();
-        // Painting is deliberate: movement alone never changes the map.
-        if (Input.GetMouseButton(0) && TryGetMapHit(playerObject.transform, out RaycastHit playerHit))
+        // Walking paints automatically. Jumping and gliding never paint, even if
+        // the ray can still reach the ground below the airborne character.
+        bool isWalkingOnGround = playerIsWalking && playerController.isGrounded && playerVelocityY <= 0f;
+        if (isWalkingOnGround && TryGetMapHit(playerObject.transform, out RaycastHit playerHit))
         {
             if (AddPaintStamp(playerHit.point, selectedColor, ref hasPlayerStamp, ref lastPlayerStamp, "Player Paint"))
             {
@@ -716,6 +727,7 @@ public sealed class BattlePrototypeController : MonoBehaviour
         Vector3 input = new Vector3((Input.GetKey(KeyCode.D) ? 1 : 0) - (Input.GetKey(KeyCode.A) ? 1 : 0), 0f, (Input.GetKey(KeyCode.W) ? 1 : 0) - (Input.GetKey(KeyCode.S) ? 1 : 0));
         if (input.sqrMagnitude > 1f) input.Normalize();
         Vector3 moveDirection = Quaternion.Euler(0f, cameraYaw, 0f) * input;
+        playerIsWalking = input.sqrMagnitude > .0001f;
         if (moveDirection.sqrMagnitude > .0001f)
         {
             Quaternion targetRotation = Quaternion.LookRotation(moveDirection, Vector3.up);
@@ -725,8 +737,24 @@ public sealed class BattlePrototypeController : MonoBehaviour
                 playerTurnSpeed * Time.deltaTime);
         }
         if (playerController.isGrounded && playerVelocityY < 0f) playerVelocityY = -1.5f;
-        if (Input.GetKeyDown(KeyCode.Space) && playerController.isGrounded) playerVelocityY = 6.1f;
-        playerVelocityY += Physics.gravity.y * Time.deltaTime;
+        if (Input.GetKeyDown(KeyCode.Space) && playerController.isGrounded)
+        {
+            playerVelocityY = jumpInitialVelocity;
+            glideSecondsRemaining = maximumGlideSeconds;
+        }
+
+        // A quick tap is intentionally a small hop. Holding the key is the
+        // player's explicit choice to retain upward momentum and glide.
+        if (Input.GetKeyUp(KeyCode.Space) && playerVelocityY > 0f)
+        {
+            playerVelocityY *= earlyReleaseUpwardVelocityMultiplier;
+            glideSecondsRemaining = 0f;
+        }
+
+        bool isGliding = playerVelocityY > 0f && Input.GetKey(KeyCode.Space) && glideSecondsRemaining > 0f;
+        if (isGliding) glideSecondsRemaining = Mathf.Max(0f, glideSecondsRemaining - Time.deltaTime);
+        else if (!Input.GetKey(KeyCode.Space) || playerVelocityY <= 0f) glideSecondsRemaining = 0f;
+        playerVelocityY += Physics.gravity.y * (isGliding ? glideGravityMultiplier : 1f) * Time.deltaTime;
         playerController.Move((moveDirection * 9f + Vector3.up * playerVelocityY) * Time.deltaTime);
         Vector3 constrained = playerObject.transform.position;
         float leftLimit = -BoardWidth * .5f + .5f;
@@ -975,6 +1003,7 @@ public sealed class BattlePrototypeController : MonoBehaviour
     void Restart()
     {
         remaining = TotalSeconds; wallDown = finished = false; selectedColor = 0;
+        playerVelocityY = glideSecondsRemaining = 0f;
         player = new Vector3(-BoardWidth * .37f, SampleTerrainHeight(-BoardWidth * .37f, -BoardDepth * .28f), -BoardDepth * .28f);
         rival = rivalDestination = new Vector3(BoardWidth * .37f, SampleTerrainHeight(BoardWidth * .37f, BoardDepth * .28f), BoardDepth * .28f);
         playerObject.transform.position = player + Vector3.up;
@@ -1090,7 +1119,7 @@ public sealed class BattlePrototypeController : MonoBehaviour
         GUI.Label(new Rect(310, 77, 370, 20), wallDown ? "장벽 붕괴 — 자유 이동" : "장벽 유지 중", small);
         GUI.Label(new Rect(24, 105, 640, 18), $"[점수 검증] BLUE  칠함 {100f * bluePainted / blueTotal:0.0}% · 정답 {100f * blueCorrect / blueTotal:0.0}% · 오답 {100f * blueWrong / blueTotal:0.0}% · 상대흔적 {blueForeign}", small);
         GUI.Label(new Rect(24, 126, 640, 18), $"[점수 검증] RED     칠함 {100f * redPainted / redTotal:0.0}% · 정답 {100f * redCorrect / redTotal:0.0}% · 오답 {100f * redWrong / redTotal:0.0}% · 상대흔적 {redForeign}", small);
-        GUI.Label(new Rect(24, Screen.height - 48, 920, 24), "WASD 이동 · 좌클릭 누르고 이동하면 색칠 · 우클릭 드래그 시점 회전 · Q / E 색상 변경 · SPACE 점프", text);
+        GUI.Label(new Rect(24, Screen.height - 48, 920, 24), "WASD 이동하면 자동 색칠 · 우클릭 드래그 시점 회전 · Q / E 색상 변경 · SPACE 길게 눌러 활공", text);
         if (finished)
         {
             GUI.Box(new Rect(Screen.width / 2 - 170, Screen.height / 2 - 55, 340, 110), GUIContent.none);
