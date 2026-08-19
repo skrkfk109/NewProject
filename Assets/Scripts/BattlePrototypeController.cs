@@ -1043,13 +1043,14 @@ public sealed class BattlePrototypeController : MonoBehaviour
         if (direction.sqrMagnitude < .001f) direction = Vector3.forward;
         Vector3 position = ClampToBoard(playerObject.transform.position + direction.normalized * 2.1f);
         position.y = SampleTerrainHeight(position.x, position.z) + .55f;
-        GameObject itemObject = CreateItemVisual($"CHEAT {type} Item", type, position, itemRoot, .7f);
+        Vector3 startPosition = position + Vector3.up * itemDropHeight;
+        GameObject itemObject = CreateItemVisual($"CHEAT {type} Item", type, startPosition, itemRoot, .7f);
         droppedItems.Add(new DroppedItem
         {
             gameObject = itemObject,
-            startPosition = position,
+            startPosition = startPosition,
             landingPosition = position,
-            fallProgress = 1f,
+            fallProgress = 0f,
             remainingLifetime = itemLifetimeSeconds,
             type = type
         });
