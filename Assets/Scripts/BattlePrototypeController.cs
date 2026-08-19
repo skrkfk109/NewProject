@@ -65,6 +65,8 @@ public sealed class BattlePrototypeController : MonoBehaviour
     [Header("Debug Cheats")]
     [Tooltip("Press B during play to immediately remove the central barrier. Disable before a public build if desired.")]
     [SerializeField] bool enableBarrierBreakCheat = true;
+    [Tooltip("Press 1-4 to spawn the corresponding item near the player for testing.")]
+    [SerializeField] bool enableItemSpawnCheats = true;
     [Header("Item Drops (Prototype)")]
     [Tooltip("Two random prototype items fall at this interval: one on each side of the barrier.")]
     [SerializeField, Range(3f, 60f)] float itemDropIntervalSeconds = 10f;
@@ -146,7 +148,7 @@ public sealed class BattlePrototypeController : MonoBehaviour
     float playerPaintRadius, rivalPaintRadius;
     float playerVisualScale = 1f, rivalVisualScale = 1f;
     float activeCorrectPaintSkillRadius;
-    int rSkillCooldownLevel;
+    int moveSpeedLevel, paintSizeLevel, rSkillCooldownLevel, rSkillRangeLevel;
     float rivalShoveElapsed = -1f;
     float rivalShoveVisual;
     Vector3 rivalShoveStart, rivalShoveEnd;
@@ -154,6 +156,7 @@ public sealed class BattlePrototypeController : MonoBehaviour
     float cameraYaw, cameraPitch = 16f;
     float desiredCameraDistance = ThirdPersonDistance;
     int selectedColor;
+    int itemCheatSpawnIndex;
     bool wallDown, finished;
     bool multiplayerActive, multiplayerHost;
     int multiplayerTeam;
@@ -803,6 +806,8 @@ public sealed class BattlePrototypeController : MonoBehaviour
         shoveCooldownRemaining = Mathf.Max(0f, shoveCooldownRemaining - Time.deltaTime);
         if (enableBarrierBreakCheat && Input.GetKeyDown(KeyCode.B) && (!multiplayerActive || multiplayerHost))
             BreakBarrierImmediately();
+        if (enableItemSpawnCheats && (!multiplayerActive || multiplayerHost))
+            HandleItemSpawnCheats();
         UpdateItemDrops();
         if (!wallDown && remaining <= WallFallsAt) { wallDown = true; wallObject.SetActive(false); }
         MovePlayer();
@@ -1015,6 +1020,41 @@ public sealed class BattlePrototypeController : MonoBehaviour
         });
     }
 
+    void HandleItemSpawnCheats()
+    {
+        if (Input.GetKeyDown(KeyCode.Alpha1)) SpawnItemCheat(ItemType.MoveSpeed);
+        if (Input.GetKeyDown(KeyCode.Alpha2)) SpawnItemCheat(ItemType.PaintSize);
+        if (Input.GetKeyDown(KeyCode.Alpha3)) SpawnItemCheat(ItemType.SkillCooldown);
+        if (Input.GetKeyDown(KeyCode.Alpha4)) SpawnItemCheat(ItemType.SkillRange);
+    }
+
+    void SpawnItemCheat(ItemType type)
+    {
+        if (playerObject == null || itemRoot == null) return;
+        if (droppedItems.Count >= maximumItemsOnField)
+        {
+            DroppedItem oldest = droppedItems[0];
+            if (oldest.gameObject != null) Destroy(oldest.gameObject);
+            droppedItems.RemoveAt(0);
+        }
+
+        Vector3 direction = Quaternion.Euler(0f, itemCheatSpawnIndex++ * 90f, 0f) * playerObject.transform.forward;
+        direction.y = 0f;
+        if (direction.sqrMagnitude < .001f) direction = Vector3.forward;
+        Vector3 position = ClampToBoard(playerObject.transform.position + direction.normalized * 2.1f);
+        position.y = SampleTerrainHeight(position.x, position.z) + .55f;
+        GameObject itemObject = CreateItemVisual($"CHEAT {type} Item", type, position, itemRoot, .7f);
+        droppedItems.Add(new DroppedItem
+        {
+            gameObject = itemObject,
+            startPosition = position,
+            landingPosition = position,
+            fallProgress = 1f,
+            remainingLifetime = itemLifetimeSeconds,
+            type = type
+        });
+    }
+
     void TryCollectDroppedItems()
     {
         // Item authority is server-side in the final online build. The local
@@ -1051,14 +1091,28 @@ public sealed class BattlePrototypeController : MonoBehaviour
         {
             switch (type)
             {
-                case ItemType.MoveSpeed: playerMoveSpeedBonus += moveSpeedIncreasePerItem; break;
+                case ItemType.MoveSpeed:
+                    playerMoveSpeedBonus += moveSpeedIncreasePerItem;
+                    moveSpeedLevel++;
+                    break;
                 case ItemType.PaintSize:
+                {
+                    float oldPaintRadius = playerPaintRadius;
+                    float oldVisualScale = playerVisualScale;
                     playerPaintRadius = Mathf.Min(3f, playerPaintRadius + paintRadiusIncreasePerItem);
                     playerVisualScale = Mathf.Min(maximumCharacterScale, playerVisualScale + characterScaleIncreasePerItem);
+                    if (playerPaintRadius > oldPaintRadius || playerVisualScale > oldVisualScale) paintSizeLevel++;
                     break;
-                case ItemType.SkillCooldown: rSkillCooldownLevel++; break;
+                }
+                case ItemType.SkillCooldown:
+                    if (CurrentRSkillCooldown > minimumRSkillCooldownSeconds) rSkillCooldownLevel++;
+                    break;
                 case ItemType.SkillRange:
-                    activeCorrectPaintSkillRadius = Mathf.Min(12f, activeCorrectPaintSkillRadius + 1f);
+                    if (activeCorrectPaintSkillRadius < 12f)
+                    {
+                        activeCorrectPaintSkillRadius = Mathf.Min(12f, activeCorrectPaintSkillRadius + 1f);
+                        rSkillRangeLevel++;
+                    }
                     break;
             }
             return;
@@ -1080,8 +1134,10 @@ public sealed class BattlePrototypeController : MonoBehaviour
         playerPaintRadius = rivalPaintRadius = paintRadius;
         playerVisualScale = rivalVisualScale = 1f;
         activeCorrectPaintSkillRadius = correctPaintSkillRadius;
-        rSkillCooldownLevel = 0;
+        moveSpeedLevel = paintSizeLevel = rSkillCooldownLevel = rSkillRangeLevel = 0;
     }
+
+    float CurrentRSkillCooldown => Mathf.Max(minimumRSkillCooldownSeconds, correctPaintSkillCooldownSeconds * Mathf.Pow(.9f, rSkillCooldownLevel));
 
     // Painting is intentionally independent of territory and the barrier.
     // Each actor always paints the ground directly below their current 3D position.
@@ -1139,7 +1195,7 @@ public sealed class BattlePrototypeController : MonoBehaviour
 
         coverageDirty = true;
         RefreshPaintTexture();
-        correctPaintSkillCooldownRemaining = Mathf.Max(minimumRSkillCooldownSeconds, correctPaintSkillCooldownSeconds * Mathf.Pow(.9f, rSkillCooldownLevel));
+        correctPaintSkillCooldownRemaining = CurrentRSkillCooldown;
     }
 
     void BreakBarrierImmediately()
@@ -1489,7 +1545,7 @@ public sealed class BattlePrototypeController : MonoBehaviour
 
         GetCoverage(0, out int blueTotal, out int bluePainted, out int blueCorrect, out int blueWrong, out int blueForeign);
         GetCoverage(1, out int redTotal, out int redPainted, out int redCorrect, out int redWrong, out int redForeign);
-        GUI.Box(new Rect(16, 12, 680, 178), GUIContent.none);
+        GUI.Box(new Rect(16, 12, 760, 222), GUIContent.none);
         GUI.Label(new Rect(24, 18, 550, 32), "COLOR CLASH  ·  3D BATTLE PROTOTYPE", title);
         GUI.Label(new Rect(24, 50, 130, 24), $"남은 시간 {Mathf.CeilToInt(remaining):00}s", text);
         GUI.Label(new Rect(172, 50, 170, 24), $"BLUE TEAM  {blueScore:0.0}%", text);
@@ -1505,7 +1561,9 @@ public sealed class BattlePrototypeController : MonoBehaviour
         GUI.Label(new Rect(24, 147, 640, 18), $"[R] 정답 범위 색칠  ·  쿨타임 {skillState}", small);
         string shoveState = shoveCooldownRemaining <= 0f ? "준비" : $"{Mathf.CeilToInt(shoveCooldownRemaining)}초";
         GUI.Label(new Rect(24, 166, 640, 18), $"[좌클릭] 전방 근접 밀치기  ·  쿨타임 {shoveState}", small);
-        GUI.Label(new Rect(24, Screen.height - 48, 1040, 24), "WASD 이동하면 자동 색칠 · 좌클릭 밀치기 · R 정답 범위 색칠 · B 장벽 즉시 붕괴(치트) · 우클릭 드래그 시점 회전 · Q / E 색상 변경 · SPACE 길게 눌러 활공", text);
+        GUI.Label(new Rect(24, 187, 730, 18), $"[아이템 강화] 이동속도 Lv.{moveSpeedLevel}  (+{playerMoveSpeedBonus:0.0}) · 일반 색칠 Lv.{paintSizeLevel}  (반경 {playerPaintRadius:0.00} / 외형 {playerVisualScale * 100f:0}%)", small);
+        GUI.Label(new Rect(24, 206, 730, 18), $"[R 강화] 쿨타임 Lv.{rSkillCooldownLevel}  ({CurrentRSkillCooldown:0.0}초) · 범위 Lv.{rSkillRangeLevel}  (반경 {activeCorrectPaintSkillRadius:0.0}/12)", small);
+        GUI.Label(new Rect(24, Screen.height - 48, 1180, 24), "WASD 이동하면 자동 색칠 · 좌클릭 밀치기 · R 정답 범위 색칠 · 1~4 아이템 생성(치트) · B 장벽 즉시 붕괴(치트) · 우클릭 드래그 시점 회전 · Q / E 색상 변경 · SPACE 길게 눌러 활공", text);
         if (finished)
         {
             GUI.Box(new Rect(Screen.width / 2 - 170, Screen.height / 2 - 55, 340, 110), GUIContent.none);
