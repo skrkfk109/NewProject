@@ -594,7 +594,8 @@ public sealed class BattlePrototypeController : MonoBehaviour
         paintStampRoot = GetContainer("Paint Stamps");
         Transform playerPreview = playerRoot.Find("Slime Model Preview");
         if (playerPreview != null) playerPreview.gameObject.SetActive(false);
-        playerObject = CreateActor("Body", new Color(.12f, .55f, 1f), player, playerRoot, playerModel);
+        playerObject = CreateActor("Body", palette[selectedColor], player, playerRoot, playerModel);
+        SetActorColour(playerObject, palette[selectedColor]);
         rivalObject = CreateActor("Body", new Color(1f, .2f, .3f), rival, rivalRoot, playerModel);
         playerController = playerObject.AddComponent<CharacterController>();
         playerController.center = Vector3.zero;
@@ -882,8 +883,10 @@ public sealed class BattlePrototypeController : MonoBehaviour
 
     void MovePlayer()
     {
+        int previousColor = selectedColor;
         if (Input.GetKeyDown(KeyCode.Q)) selectedColor = (selectedColor + palette.Length - 1) % palette.Length;
         if (Input.GetKeyDown(KeyCode.E)) selectedColor = (selectedColor + 1) % palette.Length;
+        if (selectedColor != previousColor) SetActorColour(playerObject, palette[selectedColor]);
         Vector3 input = new Vector3((Input.GetKey(KeyCode.D) ? 1 : 0) - (Input.GetKey(KeyCode.A) ? 1 : 0), 0f, (Input.GetKey(KeyCode.W) ? 1 : 0) - (Input.GetKey(KeyCode.S) ? 1 : 0));
         if (input.sqrMagnitude > 1f) input.Normalize();
         Vector3 moveDirection = Quaternion.Euler(0f, cameraYaw, 0f) * input;
