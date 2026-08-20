@@ -71,7 +71,7 @@ namespace ColorClash.Networking
 
                 JoinAllocation allocation = await RelayService.Instance.JoinAllocationAsync(ColorClashSession.RelayJoinCode);
                 transport.UseWebSockets = true;
-                transport.SetRelayServerData(allocation.ToRelayServerData("wss"));
+                transport.SetRelayServerData(new Unity.Networking.Transport.Relay.RelayServerData(allocation, "wss"));
                 networkManager.OnClientConnectedCallback -= OnClientConnected;
                 networkManager.OnClientConnectedCallback += OnClientConnected;
                 networkManager.OnClientDisconnectCallback -= OnClientDisconnected;
