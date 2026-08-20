@@ -1,0 +1,3 @@
+[submodule "Assets/ThirdParty/GameLobbySample"]
+	path = Assets/ThirdParty/GameLobbySample
+	url = https://github.com/Unity-Technologies/com.unity.services.samples.game-lobby.git

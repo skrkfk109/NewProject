@@ -1,6 +1,7 @@
 using System;
 using Unity.Netcode;
 using Unity.Netcode.Transports.UTP;
+using Unity.Networking.Transport.Relay;
 using Unity.Services.Authentication;
 using Unity.Services.Core;
 using Unity.Services.Relay;
@@ -60,9 +61,7 @@ public sealed class RelayRoomController : MonoBehaviour
         {
             await EnsureSignedIn();
             Allocation allocation = await RelayService.Instance.CreateAllocationAsync(maxPlayers - 1);
-            // Unity 6 moved the Allocation-to-transport conversion to this
-            // extension method; RelayServerData no longer has this constructor.
-            transport.SetRelayServerData(allocation.ToRelayServerData(connectionType));
+            transport.SetRelayServerData(new RelayServerData(allocation, connectionType));
             roomCode = await RelayService.Instance.GetJoinCodeAsync(allocation.AllocationId);
             if (!networkManager.StartHost()) throw new InvalidOperationException("호스트 시작에 실패했습니다.");
             status = "방 생성 완료 — 아래 코드를 친구에게 공유하세요.";
@@ -96,10 +95,10 @@ public sealed class RelayRoomController : MonoBehaviour
             JoinAllocation allocation = await RelayService.Instance.JoinAllocationAsync(code);
 #if UNITY_WEBGL && !UNITY_EDITOR
             transport.UseWebSockets = true;
-            transport.SetRelayServerData(allocation.ToRelayServerData("wss"));
+            transport.SetRelayServerData(new RelayServerData(allocation, "wss"));
 #else
             transport.UseWebSockets = false;
-            transport.SetRelayServerData(allocation.ToRelayServerData(connectionType));
+            transport.SetRelayServerData(new RelayServerData(allocation, connectionType));
 #endif
             if (!networkManager.StartClient()) throw new InvalidOperationException("클라이언트 시작에 실패했습니다.");
             roomCode = code;

@@ -76,6 +76,11 @@ public sealed class BattlePrototypeController : MonoBehaviour
     [SerializeField, Range(.15f, 2f)] float itemFallDuration = .65f;
     [SerializeField, Range(3f, 30f)] float itemLifetimeSeconds = 10f;
     [SerializeField, Range(.5f, 5f)] float itemBlinkDurationSeconds = 2f;
+    [Header("Item Models")]
+    [SerializeField] GameObject moveSpeedItemModel;
+    [SerializeField] GameObject paintSizeItemModel;
+    [SerializeField] GameObject skillCooldownItemModel;
+    [SerializeField] GameObject skillRangeItemModel;
     [Header("Item Upgrade Values")]
     [SerializeField, Range(.1f, 2f)] float moveSpeedIncreasePerItem = .5f;
     [SerializeField, Range(.05f, 1f)] float paintRadiusIncreasePerItem = .2f;
@@ -175,6 +180,7 @@ public sealed class BattlePrototypeController : MonoBehaviour
     {
 #if UNITY_EDITOR
         ResolvePlayerModelInEditor();
+        ResolveItemModelsInEditor();
 #endif
         if (!Application.isPlaying)
         {
@@ -193,6 +199,7 @@ public sealed class BattlePrototypeController : MonoBehaviour
     {
 #if UNITY_EDITOR
         ResolvePlayerModelInEditor();
+        ResolveItemModelsInEditor();
         // BuildMap samples image pixels. Enable this automatically so an image dragged
         // into the Inspector is not silently replaced by the demo map at Play time.
         if (mapSource != null)
@@ -218,6 +225,21 @@ public sealed class BattlePrototypeController : MonoBehaviour
             playerModel = importedModel;
             UnityEditor.EditorUtility.SetDirty(this);
         }
+    }
+
+    void ResolveItemModelsInEditor()
+    {
+        const string root = "Assets/Layer Lab/3D Icons-GameBasic1/Prefabs/Prefabs_Bottom/";
+        moveSpeedItemModel = ResolveItemModel(moveSpeedItemModel, root + "Boots_Bottom.prefab");
+        paintSizeItemModel = ResolveItemModel(paintSizeItemModel, root + "Mushroom_Bottom.prefab");
+        skillCooldownItemModel = ResolveItemModel(skillCooldownItemModel, root + "Hourglass_Bottom.prefab");
+        skillRangeItemModel = ResolveItemModel(skillRangeItemModel, root + "Bomb_Navy_Bottom.prefab");
+    }
+
+    static GameObject ResolveItemModel(GameObject current, string path)
+    {
+        GameObject configured = UnityEditor.AssetDatabase.LoadAssetAtPath<GameObject>(path);
+        return configured != null ? configured : current;
     }
 #endif
 
@@ -342,13 +364,33 @@ public sealed class BattlePrototypeController : MonoBehaviour
 
     GameObject CreateItemVisual(string name, ItemType type, Vector3 position, Transform parent, float scale)
     {
-        GameObject item = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+        GameObject model = ItemModel(type);
+        GameObject item = model != null ? Instantiate(model) : GameObject.CreatePrimitive(PrimitiveType.Sphere);
         item.name = name;
         item.transform.SetParent(parent);
         item.transform.position = position;
         item.transform.localScale = Vector3.one * scale;
-        item.GetComponent<Renderer>().material = NewColorMaterial(ItemColour(type));
+        if (model != null)
+        {
+            NormalizeModel(item.transform, 1.4f * scale);
+        }
+        else
+        {
+            item.GetComponent<Renderer>().material = NewColorMaterial(ItemColour(type));
+        }
         return item;
+    }
+
+    GameObject ItemModel(ItemType type)
+    {
+        return type switch
+        {
+            ItemType.MoveSpeed => moveSpeedItemModel,
+            ItemType.PaintSize => paintSizeItemModel,
+            ItemType.SkillCooldown => skillCooldownItemModel,
+            ItemType.SkillRange => skillRangeItemModel,
+            _ => null
+        };
     }
 
     static Color ItemColour(ItemType type)
