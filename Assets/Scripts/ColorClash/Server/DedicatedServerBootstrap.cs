@@ -64,6 +64,10 @@ namespace ColorClash.Server
                 DontDestroyOnLoad(serverObject);
                 var transport = serverObject.AddComponent<UnityTransport>();
                 networkManager = serverObject.AddComponent<NetworkManager>();
+                // A NetworkManager added at runtime does not receive the inspector's
+                // serialized NetworkConfig. Create the same baseline config explicitly
+                // before assigning its transport.
+                networkManager.NetworkConfig ??= new NetworkConfig();
                 networkManager.NetworkConfig.NetworkTransport = transport;
             }
 
@@ -107,8 +111,9 @@ namespace ColorClash.Server
                 if (signIn.IsFaulted) { onFailure(signIn.Exception); yield break; }
             }
 
-            // Relay maxConnections excludes the dedicated server itself.
-            var allocationTask = RelayService.Instance.CreateAllocationAsync(MatchSettings.Default.maxPlayers - 1);
+            // Relay maxConnections counts playable clients, not the dedicated
+            // server process. Color Clash supports a full 2v2 (four clients).
+            var allocationTask = RelayService.Instance.CreateAllocationAsync(MatchSettings.Default.maxPlayers);
             while (!allocationTask.IsCompleted) yield return null;
             if (allocationTask.IsFaulted) { onFailure(allocationTask.Exception); yield break; }
 
@@ -123,14 +128,16 @@ namespace ColorClash.Server
                 onFailure(new InvalidOperationException("UnityTransport is missing from the NetworkManager."));
                 yield break;
             }
+            // The public game client is WebGL. Use Relay WebSockets on both sides
+            // so browser clients and the Linux dedicated server share one protocol.
             RelayServerEndpoint endpoint = allocation.ServerEndpoints.Find(candidate =>
-                string.Equals(candidate.ConnectionType, "dtls", StringComparison.OrdinalIgnoreCase));
+                string.Equals(candidate.ConnectionType, "wss", StringComparison.OrdinalIgnoreCase));
             if (endpoint == null)
             {
-                onFailure(new InvalidOperationException("Relay allocation did not return a DTLS endpoint."));
+                onFailure(new InvalidOperationException("Relay allocation did not return a WSS endpoint."));
                 yield break;
             }
-            transport.UseWebSockets = false;
+            transport.UseWebSockets = true;
             transport.SetRelayServerData(new Unity.Networking.Transport.Relay.RelayServerData(
                 endpoint.Host,
                 (ushort)endpoint.Port,
@@ -139,7 +146,7 @@ namespace ColorClash.Server
                 allocation.ConnectionData,
                 allocation.Key,
                 endpoint.Secure,
-                false));
+                true));
             if (!networkManager.StartServer())
             {
                 onFailure(new InvalidOperationException("NetworkManager.StartServer returned false."));
@@ -196,6 +203,10 @@ namespace ColorClash.Server
         {
             reader.ReadValueSafe(out bool ready);
             match.SetReady(senderClientId, ready);
+            // The client registers its handlers after loading battle. Re-send its
+            // own authoritative slot at that point so team assignment is never lost.
+            if (match.TryGetPlayerState(senderClientId, out var state))
+                SendPlayerState(senderClientId, state);
             BroadcastSnapshot();
         }
 
@@ -244,6 +255,15 @@ namespace ColorClash.Server
             writer.WriteValueSafe((byte)state.team);
             writer.WriteValueSafe(state.position);
             SendToAll(PlayerStateMessage, writer);
+        }
+
+        void SendPlayerState(ulong clientId, AuthoritativeMatch.PlayerState state)
+        {
+            using var writer = new FastBufferWriter(sizeof(ulong) + sizeof(byte) + sizeof(float) * 3, Allocator.Temp);
+            writer.WriteValueSafe(state.playerId);
+            writer.WriteValueSafe((byte)state.team);
+            writer.WriteValueSafe(state.position);
+            networkManager.CustomMessagingManager.SendNamedMessage(PlayerStateMessage, clientId, writer);
         }
 
         void SendToAll(string messageName, FastBufferWriter writer)

@@ -1,0 +1,5 @@
+# Replace the hostname with the DNS name selected for the VPS.
+# Caddy obtains and renews the HTTPS certificate automatically.
+2-28-8-212.sslip.io {
+    reverse_proxy 127.0.0.1:8080
+}

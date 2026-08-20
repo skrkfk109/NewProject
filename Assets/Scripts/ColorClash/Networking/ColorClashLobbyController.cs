@@ -7,6 +7,8 @@ using Unity.Services.Core;
 using Unity.Services.Lobbies;
 using Unity.Services.Lobbies.Models;
 using UnityEngine;
+using UnityEngine.Networking;
+using UnityEngine.SceneManagement;
 
 namespace ColorClash.Networking
 {
@@ -23,6 +25,8 @@ namespace ColorClash.Networking
 
         [SerializeField] string defaultRoomName = "Color Clash Room";
         [SerializeField, Range(2, 4)] int maximumPlayers = 4;
+        [Tooltip("HTTPS endpoint of the small allocator running on the Color Clash VPS.")]
+        [SerializeField] string allocatorEndpoint = "https://2-28-8-212.sslip.io/allocate";
 
         readonly List<Lobby> visibleRooms = new List<Lobby>();
         bool initialized;
@@ -31,6 +35,19 @@ namespace ColorClash.Networking
         string roomName;
         string joinCode;
         Lobby currentRoom;
+
+        [Serializable]
+        sealed class AllocationRequest
+        {
+            public string lobbyId;
+        }
+
+        [Serializable]
+        sealed class AllocationResponse
+        {
+            public string relayJoinCode;
+            public string error;
+        }
 
         public IReadOnlyList<Lobby> VisibleRooms => visibleRooms;
         public Lobby CurrentRoom => currentRoom;
@@ -41,6 +58,14 @@ namespace ColorClash.Networking
         {
             roomName = defaultRoomName;
             StartCoroutine(InitializeRoutine());
+        }
+
+        [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
+        static void CreateForLobbyScene()
+        {
+            if (!Application.isPlaying || SceneManager.GetActiveScene().name != "Lobby") return;
+            if (FindFirstObjectByType<ColorClashLobbyController>() == null)
+                new GameObject("Color Clash Online Lobby").AddComponent<ColorClashLobbyController>();
         }
 
         IEnumerator InitializeRoutine()
@@ -127,9 +152,8 @@ namespace ColorClash.Networking
             }
 
             currentRoom = create.Result;
-            busy = false;
-            status = "방이 생성되었습니다. 서버를 할당하는 중…";
-            ColorClashSession.BeginOnline(currentRoom.Id, MatchSettings.Default);
+            status = "방이 생성되었습니다. 전용 서버를 할당하는 중…";
+            yield return StartCoroutine(AllocateServerRoutine());
         }
 
         public void JoinRoomByCode(string roomCode)
@@ -154,9 +178,92 @@ namespace ColorClash.Networking
             }
 
             currentRoom = join.Result;
-            busy = false;
             status = "방에 참가했습니다. 서버 연결 정보를 기다리는 중…";
-            ColorClashSession.BeginOnline(currentRoom.Id, MatchSettings.Default);
+            yield return StartCoroutine(WaitForServerTicketRoutine());
+        }
+
+        IEnumerator AllocateServerRoutine()
+        {
+            if (string.IsNullOrWhiteSpace(allocatorEndpoint))
+            {
+                SetFailure(new InvalidOperationException("VPS 할당 API 주소가 비어 있습니다."));
+                yield break;
+            }
+
+            string body = JsonUtility.ToJson(new AllocationRequest { lobbyId = currentRoom.Id });
+            using var request = new UnityWebRequest(allocatorEndpoint, UnityWebRequest.kHttpVerbPOST)
+            {
+                uploadHandler = new UploadHandlerRaw(System.Text.Encoding.UTF8.GetBytes(body)),
+                downloadHandler = new DownloadHandlerBuffer(),
+                timeout = 30
+            };
+            request.SetRequestHeader("Content-Type", "application/json");
+            yield return request.SendWebRequest();
+            if (request.result != UnityWebRequest.Result.Success)
+            {
+                SetFailure(new InvalidOperationException("전용 서버 할당 실패: " + request.error));
+                yield break;
+            }
+
+            AllocationResponse response = JsonUtility.FromJson<AllocationResponse>(request.downloadHandler.text);
+            if (response == null || string.IsNullOrWhiteSpace(response.relayJoinCode))
+            {
+                SetFailure(new InvalidOperationException(response?.error ?? "전용 서버가 Relay 코드를 반환하지 않았습니다."));
+                yield break;
+            }
+
+            var update = LobbyService.Instance.UpdateLobbyAsync(currentRoom.Id, new UpdateLobbyOptions
+            {
+                Data = new Dictionary<string, DataObject>
+                {
+                    { ServerStateKey, new DataObject(DataObject.VisibilityOptions.Public, "ready", DataObject.IndexOptions.S1) },
+                    { ServerTicketKey, new DataObject(DataObject.VisibilityOptions.Member, response.relayJoinCode.Trim().ToUpperInvariant()) }
+                }
+            });
+            while (!update.IsCompleted) yield return null;
+            if (update.IsFaulted)
+            {
+                SetFailure(update.Exception);
+                yield break;
+            }
+
+            currentRoom = update.Result;
+            BeginDedicatedMatch(response.relayJoinCode);
+        }
+
+        IEnumerator WaitForServerTicketRoutine()
+        {
+            const float timeoutSeconds = 45f;
+            float timeoutAt = Time.unscaledTime + timeoutSeconds;
+            while (Time.unscaledTime < timeoutAt)
+            {
+                string ticket = ReadLobbyData(currentRoom, ServerTicketKey, string.Empty);
+                if (!string.IsNullOrWhiteSpace(ticket))
+                {
+                    BeginDedicatedMatch(ticket);
+                    yield break;
+                }
+
+                yield return new WaitForSecondsRealtime(1f);
+                var get = LobbyService.Instance.GetLobbyAsync(currentRoom.Id);
+                while (!get.IsCompleted) yield return null;
+                if (get.IsFaulted)
+                {
+                    SetFailure(get.Exception);
+                    yield break;
+                }
+                currentRoom = get.Result;
+            }
+
+            SetFailure(new TimeoutException("전용 서버 할당을 기다리는 시간이 초과되었습니다."));
+        }
+
+        void BeginDedicatedMatch(string relayJoinCode)
+        {
+            busy = false;
+            status = "전용 서버에 연결하는 중…";
+            ColorClashSession.BeginOnline(currentRoom.Id, MatchSettings.Default, relayJoinCode);
+            DedicatedRelayClient.Connect(relayJoinCode);
         }
 
         void SetFailure(Exception exception)
@@ -181,7 +288,7 @@ namespace ColorClash.Networking
         void OnGUI()
         {
             if (!Application.isPlaying) return;
-            GUI.Box(new Rect(20, 20, 520, 390), "COLOR CLASH · ONLINE LOBBY");
+            GUI.Box(new Rect(20, 20, 520, 390), "COLOR CLASH · DEDICATED ONLINE LOBBY");
             GUI.Label(new Rect(36, 58, 480, 24), status);
             GUI.Label(new Rect(36, 94, 120, 24), "방 이름");
             roomName = GUI.TextField(new Rect(120, 94, 220, 24), roomName);
@@ -195,7 +302,7 @@ namespace ColorClash.Networking
             if (currentRoom != null)
             {
                 GUI.Label(new Rect(36, 205, 460, 22), $"현재 방: {currentRoom.Name}  ·  코드: {currentRoom.LobbyCode}");
-                GUI.Label(new Rect(36, 227, 460, 22), "서버 상태: " + ReadLobbyData(currentRoom, ServerStateKey, "할당 대기"));
+                GUI.Label(new Rect(36, 227, 460, 22), "전용 서버: " + ReadLobbyData(currentRoom, ServerStateKey, "할당 대기"));
             }
 
             float y = 270f;

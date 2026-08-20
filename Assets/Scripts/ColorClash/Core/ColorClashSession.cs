@@ -11,19 +11,27 @@ namespace ColorClash.Core
         public static MatchSettings Settings { get; private set; } = MatchSettings.Default;
         public static bool IsOnlineMatch { get; private set; }
         public static string RoomId { get; private set; } = string.Empty;
+        public static string RelayJoinCode { get; private set; } = string.Empty;
 
         public static void BeginOffline()
         {
             Settings = MatchSettings.Default;
             IsOnlineMatch = false;
             RoomId = string.Empty;
+            RelayJoinCode = string.Empty;
         }
 
-        public static void BeginOnline(string roomId, MatchSettings settings)
+        public static void BeginOnline(string roomId, MatchSettings settings, string relayJoinCode = "")
         {
             Settings = settings.maxPlayers > 0 ? settings : MatchSettings.Default;
             IsOnlineMatch = true;
             RoomId = roomId ?? string.Empty;
+            RelayJoinCode = relayJoinCode?.Trim().ToUpperInvariant() ?? string.Empty;
+        }
+
+        public static void SetRelayJoinCode(string relayJoinCode)
+        {
+            RelayJoinCode = relayJoinCode?.Trim().ToUpperInvariant() ?? string.Empty;
         }
     }
 }

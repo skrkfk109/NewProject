@@ -1,0 +1,16 @@
+[Unit]
+Description=Color Clash Dedicated Server Allocator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/colorclash
+ExecStart=/usr/bin/python3 /opt/colorclash/colorclash_allocator.py
+Restart=always
+RestartSec=3
+User=root
+Environment=COLORCLASH_ALLOCATOR_PORT=8080
+
+[Install]
+WantedBy=multi-user.target
